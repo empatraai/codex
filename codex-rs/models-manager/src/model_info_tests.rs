@@ -1,6 +1,29 @@
 use super::*;
+use codex_protocol::config_types::Personality;
 use crate::ModelsManagerConfig;
 use pretty_assertions::assert_eq;
+
+#[test]
+fn fallback_base_instructions_identify_empatra_studio_agent() {
+    let model = model_info_from_slug("unknown-model");
+
+    assert!(model
+        .base_instructions
+        .starts_with("You are AI Агент в Студии от компании Эмпатра,"));
+    assert!(!model.base_instructions.contains("Codex CLI"));
+    assert!(!model.base_instructions.contains("OpenAI"));
+}
+
+#[test]
+fn personality_template_identifies_empatra_studio_agent() {
+    let model = model_info_from_slug("gpt-5.2-codex");
+    let instructions = model.get_model_instructions(Some(Personality::Pragmatic));
+
+    assert!(instructions.starts_with("You are AI Агент в Студии от компании Эмпатра."));
+    assert!(instructions.contains("Основан на передовых AI-моделях."));
+    assert!(!instructions.contains("You are Codex"));
+    assert!(!instructions.contains("based on GPT-5"));
+}
 
 #[test]
 fn reasoning_summaries_override_true_enables_support() {
