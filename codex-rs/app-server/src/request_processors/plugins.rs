@@ -567,7 +567,10 @@ impl PluginRequestProcessor {
 
         // TODO(remote plugins): Remove this once remote plugins are ready and vertical plugins are
         // served directly from the normal remote catalog.
-        if include_vertical && !config.features.enabled(Feature::RemotePlugin) {
+        if plugins_input.openai_marketplaces_enabled
+            && include_vertical
+            && !config.features.enabled(Feature::RemotePlugin)
+        {
             let remote_plugin_service_config = RemotePluginServiceConfig {
                 chatgpt_base_url: config.chatgpt_base_url.clone(),
             };
@@ -595,13 +598,19 @@ impl PluginRequestProcessor {
         }
 
         let mut remote_sources = Vec::new();
-        if !explicit_marketplace_kinds && config.features.enabled(Feature::RemotePlugin) {
+        if plugins_input.openai_marketplaces_enabled
+            && !explicit_marketplace_kinds
+            && config.features.enabled(Feature::RemotePlugin)
+        {
             remote_sources.push(RemoteMarketplaceSource::Global);
         }
-        if marketplace_kinds.contains(&PluginListMarketplaceKind::WorkspaceDirectory) {
+        if plugins_input.openai_marketplaces_enabled
+            && marketplace_kinds.contains(&PluginListMarketplaceKind::WorkspaceDirectory)
+        {
             remote_sources.push(RemoteMarketplaceSource::WorkspaceDirectory);
         }
-        if marketplace_kinds.contains(&PluginListMarketplaceKind::SharedWithMe)
+        if plugins_input.openai_marketplaces_enabled
+            && marketplace_kinds.contains(&PluginListMarketplaceKind::SharedWithMe)
             && config.features.enabled(Feature::PluginSharing)
         {
             remote_sources.push(RemoteMarketplaceSource::SharedWithMe);

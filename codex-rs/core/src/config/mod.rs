@@ -1320,10 +1320,16 @@ impl Config {
 
     /// Build the plugin-manager input from the effective config.
     pub fn plugins_config_input(&self) -> PluginsConfigInput {
+        let effective_config = self.config_layer_stack.effective_config();
         PluginsConfigInput::new(
             self.config_layer_stack.clone(),
             self.features.enabled(Feature::Plugins),
             self.features.enabled(Feature::RemotePlugin),
+            raw_feature_enabled(
+                &effective_config,
+                "openai_marketplaces",
+                /*default_enabled*/ true,
+            ),
             self.chatgpt_base_url.clone(),
         )
     }
@@ -1621,6 +1627,15 @@ pub fn validate_feature_requirements_for_config_toml(
 ) -> std::io::Result<()> {
     managed_features::validate_explicit_feature_settings_in_config_toml(cfg, feature_requirements)?;
     managed_features::validate_feature_requirements_in_config_toml(cfg, feature_requirements)
+}
+
+fn raw_feature_enabled(config: &TomlValue, key: &str, default_enabled: bool) -> bool {
+    config
+        .get("features")
+        .and_then(TomlValue::as_table)
+        .and_then(|features| features.get(key))
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(default_enabled)
 }
 
 fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> {

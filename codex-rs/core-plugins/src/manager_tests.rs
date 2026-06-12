@@ -2238,6 +2238,93 @@ plugins = true
 }
 
 #[tokio::test]
+async fn list_marketplaces_excludes_curated_repo_when_openai_marketplaces_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo_root = tmp.path().join("repo");
+    let curated_root = curated_plugins_repo_path(tmp.path());
+    let local_plugin_root = repo_root.join("plugins/local-helper");
+
+    write_file(
+        &tmp.path().join(CONFIG_TOML_FILE),
+        r#"[features]
+plugins = true
+openai_marketplaces = false
+"#,
+    );
+    write_openai_curated_marketplace(&curated_root, &["linear"]);
+    fs::create_dir_all(repo_root.join(".git")).unwrap();
+    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    fs::create_dir_all(local_plugin_root.join(".codex-plugin")).unwrap();
+    fs::write(
+        repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "local-tools",
+  "plugins": [
+    {
+      "name": "local-helper",
+      "source": {
+        "source": "local",
+        "path": "./plugins/local-helper"
+      }
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+    fs::write(
+        local_plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{"name":"local-helper"}"#,
+    )
+    .unwrap();
+
+    let config = load_config(tmp.path(), &repo_root).await;
+    let marketplaces = PluginsManager::new(tmp.path().to_path_buf())
+        .list_marketplaces_for_config(&config, &[AbsolutePathBuf::try_from(repo_root).unwrap()])
+        .unwrap()
+        .marketplaces;
+
+    assert!(
+        marketplaces
+            .iter()
+            .all(|marketplace| marketplace.name != OPENAI_CURATED_MARKETPLACE_NAME)
+    );
+    assert_eq!(marketplaces.len(), 1);
+    assert_eq!(marketplaces[0].name, "local-tools");
+    assert_eq!(marketplaces[0].plugins[0].id, "local-helper@local-tools");
+}
+
+#[tokio::test]
+async fn openai_remote_plugin_paths_are_noops_when_openai_marketplaces_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        &tmp.path().join(CONFIG_TOML_FILE),
+        r#"[features]
+plugins = true
+openai_marketplaces = false
+"#,
+    );
+
+    let mut config = load_config(tmp.path(), tmp.path()).await;
+    config.chatgpt_base_url = "http://127.0.0.1:9/backend-api/".to_string();
+    let manager = PluginsManager::new(tmp.path().to_path_buf());
+
+    assert_eq!(
+        manager
+            .featured_plugin_ids_for_config(&config, /*auth*/ None)
+            .await
+            .unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        manager
+            .sync_plugins_from_remote(&config, /*auth*/ None, /*additive_only*/ true)
+            .await
+            .unwrap(),
+        RemotePluginSyncResult::default()
+    );
+}
+
+#[tokio::test]
 async fn list_marketplaces_includes_installed_marketplace_roots() {
     let tmp = tempfile::tempdir().unwrap();
     let marketplace_root = marketplace_install_root(tmp.path()).join("debug");

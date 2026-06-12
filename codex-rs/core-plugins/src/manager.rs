@@ -90,6 +90,7 @@ pub struct PluginsConfigInput {
     pub config_layer_stack: ConfigLayerStack,
     pub plugins_enabled: bool,
     pub remote_plugin_enabled: bool,
+    pub openai_marketplaces_enabled: bool,
     pub chatgpt_base_url: String,
 }
 
@@ -98,12 +99,14 @@ impl PluginsConfigInput {
         config_layer_stack: ConfigLayerStack,
         plugins_enabled: bool,
         remote_plugin_enabled: bool,
+        openai_marketplaces_enabled: bool,
         chatgpt_base_url: String,
     ) -> Self {
         Self {
             config_layer_stack,
             plugins_enabled,
             remote_plugin_enabled,
+            openai_marketplaces_enabled,
             chatgpt_base_url,
         }
     }
@@ -489,7 +492,7 @@ impl PluginsManager {
 
         let outcome = load_plugins_from_layer_stack(
             &config.config_layer_stack,
-            self.remote_installed_plugin_configs(),
+            self.remote_installed_plugin_configs(config),
             &self.store,
             self.restriction_product,
         )
@@ -534,7 +537,7 @@ impl PluginsManager {
         }
         load_plugins_from_layer_stack(
             config_layer_stack,
-            self.remote_installed_plugin_configs(),
+            self.remote_installed_plugin_configs(config),
             &self.store,
             self.restriction_product,
         )
@@ -566,7 +569,14 @@ impl PluginsManager {
         }
     }
 
-    fn remote_installed_plugin_configs(&self) -> HashMap<String, PluginConfig> {
+    fn remote_installed_plugin_configs(
+        &self,
+        config: &PluginsConfigInput,
+    ) -> HashMap<String, PluginConfig> {
+        if !config.openai_marketplaces_enabled {
+            return HashMap::new();
+        }
+
         let cache = match self.remote_installed_plugins_cache.read() {
             Ok(cache) => cache,
             Err(err) => err.into_inner(),
@@ -597,6 +607,10 @@ impl PluginsManager {
         visible_scopes: &[RemotePluginScope],
         on_effective_plugins_changed: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) -> Result<Vec<crate::remote::RemoteMarketplace>, RemotePluginCatalogError> {
+        if !config.openai_marketplaces_enabled {
+            return Ok(Vec::new());
+        }
+
         let plugins = crate::remote::fetch_remote_installed_plugins(
             &remote_plugin_service_config(config),
             auth,
@@ -674,7 +688,7 @@ impl PluginsManager {
         notify: RemoteInstalledPluginsCacheRefreshNotify,
         on_effective_plugins_changed: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) {
-        if !config.plugins_enabled {
+        if !config.plugins_enabled || !config.openai_marketplaces_enabled {
             return;
         }
 
@@ -694,7 +708,7 @@ impl PluginsManager {
         auth: Option<CodexAuth>,
         on_effective_plugins_changed: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) {
-        if !config.plugins_enabled {
+        if !config.plugins_enabled || !config.openai_marketplaces_enabled {
             return;
         }
 
@@ -725,6 +739,9 @@ impl PluginsManager {
         on_effective_plugins_changed: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) {
         self.maybe_start_non_curated_plugin_cache_refresh(roots);
+        if !config.openai_marketplaces_enabled {
+            return;
+        }
         self.maybe_start_remote_installed_plugins_cache_refresh(
             config,
             auth.clone(),
@@ -790,7 +807,7 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         auth: Option<&CodexAuth>,
     ) -> Result<Vec<String>, RemotePluginFetchError> {
-        if !config.plugins_enabled {
+        if !config.plugins_enabled || !config.openai_marketplaces_enabled {
             return Ok(Vec::new());
         }
 
@@ -968,7 +985,7 @@ impl PluginsManager {
             PluginRemoteSyncError::Config(anyhow::anyhow!("remote plugin sync semaphore closed"))
         })?;
 
-        if !config.plugins_enabled {
+        if !config.plugins_enabled || !config.openai_marketplaces_enabled {
             return Ok(RemotePluginSyncResult::default());
         }
 
@@ -1474,7 +1491,9 @@ impl PluginsManager {
         on_effective_plugins_changed: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
     ) {
         if config.plugins_enabled {
-            self.start_curated_repo_sync();
+            if config.openai_marketplaces_enabled {
+                self.start_curated_repo_sync();
+            }
             let should_spawn_marketplace_auto_upgrade = {
                 let mut state = match self.configured_marketplace_upgrade_state.write() {
                     Ok(state) => state,
@@ -1526,45 +1545,47 @@ impl PluginsManager {
                     warn!("failed to start configured marketplace auto-upgrade task: {err}");
                 }
             }
-            start_startup_remote_plugin_sync_once(
-                Arc::clone(self),
-                self.codex_home.clone(),
-                config.clone(),
-                auth_manager.clone(),
-            );
-
-            let config_for_remote_sync = config.clone();
-            let manager = Arc::clone(self);
-            let auth_manager_for_remote_sync = auth_manager.clone();
-            let on_effective_plugins_changed = on_effective_plugins_changed.clone();
-            tokio::spawn(async move {
-                let auth = auth_manager_for_remote_sync.auth().await;
-                manager.maybe_start_remote_installed_plugins_cache_refresh(
-                    &config_for_remote_sync,
-                    auth.clone(),
-                    on_effective_plugins_changed.clone(),
+            if config.openai_marketplaces_enabled {
+                start_startup_remote_plugin_sync_once(
+                    Arc::clone(self),
+                    self.codex_home.clone(),
+                    config.clone(),
+                    auth_manager.clone(),
                 );
-                manager.maybe_start_remote_installed_plugin_bundle_sync(
-                    &config_for_remote_sync,
-                    auth,
-                    on_effective_plugins_changed,
-                );
-            });
 
-            let config = config.clone();
-            let manager = Arc::clone(self);
-            tokio::spawn(async move {
-                let auth = auth_manager.auth().await;
-                if let Err(err) = manager
-                    .featured_plugin_ids_for_config(&config, auth.as_ref())
-                    .await
-                {
-                    warn!(
-                        error = %err,
-                        "failed to warm featured plugin ids cache"
+                let config_for_remote_sync = config.clone();
+                let manager = Arc::clone(self);
+                let auth_manager_for_remote_sync = auth_manager.clone();
+                let on_effective_plugins_changed = on_effective_plugins_changed.clone();
+                tokio::spawn(async move {
+                    let auth = auth_manager_for_remote_sync.auth().await;
+                    manager.maybe_start_remote_installed_plugins_cache_refresh(
+                        &config_for_remote_sync,
+                        auth.clone(),
+                        on_effective_plugins_changed.clone(),
                     );
-                }
-            });
+                    manager.maybe_start_remote_installed_plugin_bundle_sync(
+                        &config_for_remote_sync,
+                        auth,
+                        on_effective_plugins_changed,
+                    );
+                });
+
+                let config = config.clone();
+                let manager = Arc::clone(self);
+                tokio::spawn(async move {
+                    let auth = auth_manager.auth().await;
+                    if let Err(err) = manager
+                        .featured_plugin_ids_for_config(&config, auth.as_ref())
+                        .await
+                    {
+                        warn!(
+                            error = %err,
+                            "failed to warm featured plugin ids cache"
+                        );
+                    }
+                });
+            }
         }
     }
 
@@ -1924,11 +1945,13 @@ impl PluginsManager {
             &config.config_layer_stack,
             self.codex_home.as_path(),
         ));
-        let curated_repo_root = curated_plugins_repo_path(self.codex_home.as_path());
-        if curated_repo_root.is_dir()
-            && let Ok(curated_repo_root) = AbsolutePathBuf::try_from(curated_repo_root)
-        {
-            roots.push(curated_repo_root);
+        if config.openai_marketplaces_enabled {
+            let curated_repo_root = curated_plugins_repo_path(self.codex_home.as_path());
+            if curated_repo_root.is_dir()
+                && let Ok(curated_repo_root) = AbsolutePathBuf::try_from(curated_repo_root)
+            {
+                roots.push(curated_repo_root);
+            }
         }
         roots.sort_unstable();
         roots.dedup();
