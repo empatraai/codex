@@ -87,8 +87,6 @@ pub enum TryStartTurnIfIdleRejectionReason {
     /// Another turn or task is active, or the idle reservation was lost before
     /// the automatic turn could start.
     Busy,
-    /// The turn context could not be created for the current thread settings.
-    TurnContextUnavailable,
 }
 
 /// Rejection returned when an extension asks to start automatic idle work but

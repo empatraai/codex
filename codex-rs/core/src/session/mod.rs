@@ -301,6 +301,7 @@ use crate::mcp::McpManager;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::rollout::map_session_init_error;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
+use crate::shell;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingRequestPermissions;
@@ -423,6 +424,7 @@ pub(crate) struct CodexSpawnArgs {
     /// Root sessions and non-thread-spawn subagents pass a disabled context;
     /// `Session::new` creates the root trace itself when rollout tracing is enabled.
     pub(crate) parent_rollout_thread_trace: ThreadTraceContext,
+    pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
     pub(crate) environment_selections: ResolvedTurnEnvironments,
     pub(crate) thread_extension_init: ExtensionDataInit,
@@ -502,6 +504,7 @@ impl Codex {
             dynamic_tools,
             metrics_service_name,
             inherited_shell_snapshot,
+            user_shell_override,
             inherited_exec_policy,
             parent_rollout_thread_trace,
             parent_trace: _,
@@ -634,6 +637,7 @@ impl Codex {
             thread_source,
             dynamic_tools,
             inherited_shell_snapshot,
+            user_shell_override,
         };
 
         // Generate a unique ID for the lifetime of this Codex session.
@@ -1440,6 +1444,7 @@ impl Session {
             codex_home,
             session_source,
             environment_selections,
+            local_shell_override,
         ) = {
             let mut state = self.state.lock().await;
             let updated = match state.session_configuration.apply(&updates) {
@@ -1462,6 +1467,7 @@ impl Session {
             let codex_home = updated.codex_home.clone();
             let session_source = updated.session_source.clone();
             let environment_selections = updated.environment_selections().to_vec();
+            let local_shell_override = updated.user_shell_override.clone();
             state.session_configuration = updated;
             (
                 previous_config,
@@ -1471,13 +1477,15 @@ impl Session {
                 codex_home,
                 session_source,
                 environment_selections,
+                local_shell_override,
             )
         };
 
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
-        match crate::environment_selection::resolve_environment_selections(
+        match crate::environment_selection::resolve_environment_selections_with_local_shell_override(
             self.services.environment_manager.as_ref(),
             &environment_selections,
+            local_shell_override.as_ref(),
         )
         .await
         {

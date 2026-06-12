@@ -701,11 +701,13 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         multi_agent_runtime: TurnMultiAgentRuntime,
     ) -> CodexResult<Arc<TurnContext>> {
-        let mut turn_environments = crate::environment_selection::resolve_environment_selections(
-            self.services.environment_manager.as_ref(),
-            session_configuration.environment_selections(),
-        )
-        .await?;
+        let mut turn_environments =
+            crate::environment_selection::resolve_environment_selections_with_local_shell_override(
+                self.services.environment_manager.as_ref(),
+                session_configuration.environment_selections(),
+                session_configuration.user_shell_override.as_ref(),
+            )
+            .await?;
         for turn_environment in &mut turn_environments.turn_environments {
             if !turn_environment.environment.is_remote() {
                 turn_environment.shell.shell_snapshot = self.services.shell_snapshot_tx.subscribe();

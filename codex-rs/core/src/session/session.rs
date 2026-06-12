@@ -104,6 +104,7 @@ pub(crate) struct SessionConfiguration {
     pub(super) thread_source: Option<ThreadSource>,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
+    pub(super) user_shell_override: Option<crate::shell::Shell>,
 }
 
 impl SessionConfiguration {
@@ -438,14 +439,17 @@ async fn warm_plugins_and_skills_for_session_init(
     plugins_manager: Arc<PluginsManager>,
     skills_manager: Arc<SkillsManager>,
     environments: Vec<TurnEnvironmentSelection>,
+    local_shell_override: Option<crate::shell::Shell>,
 ) -> Vec<SkillError> {
-    let fs = crate::environment_selection::resolve_environment_selections(
-        environment_manager.as_ref(),
-        &environments,
-    )
-    .await
-    .ok()
-    .and_then(|resolved| resolved.primary_filesystem());
+    let fs =
+        crate::environment_selection::resolve_environment_selections_with_local_shell_override(
+            environment_manager.as_ref(),
+            &environments,
+            local_shell_override.as_ref(),
+        )
+        .await
+        .ok()
+        .and_then(|resolved| resolved.primary_filesystem());
     let plugins_input = config.plugins_config_input();
     let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
     let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
@@ -621,6 +625,7 @@ impl Session {
             Arc::clone(&plugins_manager),
             Arc::clone(&skills_manager),
             session_configuration.environment_selections().to_vec(),
+            session_configuration.user_shell_override.clone(),
         )
         .instrument(info_span!(
             "session_init.plugin_skill_warmup",
@@ -1093,9 +1098,10 @@ impl Session {
                 *cancel_guard = cancel_token.clone();
                 cancel_token
             };
-            let turn_environment = crate::environment_selection::resolve_environment_selections(
+            let turn_environment = crate::environment_selection::resolve_environment_selections_with_local_shell_override(
                 sess.services.environment_manager.as_ref(),
                 session_configuration.environment_selections(),
+                session_configuration.user_shell_override.as_ref(),
             )
             .await
             .map_err(|err| {

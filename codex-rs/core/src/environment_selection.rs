@@ -60,9 +60,23 @@ impl ResolvedTurnEnvironments {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_environment_selections(
     environment_manager: &EnvironmentManager,
     environments: &[TurnEnvironmentSelection],
+) -> CodexResult<ResolvedTurnEnvironments> {
+    resolve_environment_selections_with_local_shell_override(
+        environment_manager,
+        environments,
+        /*local_shell_override*/ None,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_environment_selections_with_local_shell_override(
+    environment_manager: &EnvironmentManager,
+    environments: &[TurnEnvironmentSelection],
+    local_shell_override: Option<&Shell>,
 ) -> CodexResult<ResolvedTurnEnvironments> {
     let mut turn_environments = Vec::with_capacity(environments.len());
     for selected_environment in environments {
@@ -72,16 +86,22 @@ pub(crate) async fn resolve_environment_selections(
             .ok_or_else(|| {
                 CodexErr::Fatal(format!("environment `{environment_id}` is unavailable"))
             })?;
-        let info = environment.info().await.map_err(|err| {
-            CodexErr::Fatal(format!(
-                "failed to get info for environment `{environment_id}`: {err}"
-            ))
-        })?;
-        let shell = Shell::from_environment_shell_info(info.shell).map_err(|err| {
-            CodexErr::Fatal(format!(
-                "failed to resolve shell for environment `{environment_id}`: {err}"
-            ))
-        })?;
+        let shell = if !environment.is_remote()
+            && let Some(local_shell_override) = local_shell_override
+        {
+            local_shell_override.clone()
+        } else {
+            let info = environment.info().await.map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to get info for environment `{environment_id}`: {err}"
+                ))
+            })?;
+            Shell::from_environment_shell_info(info.shell).map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to resolve shell for environment `{environment_id}`: {err}"
+                ))
+            })?
+        };
         turn_environments.push(TurnEnvironment {
             environment_id,
             environment,

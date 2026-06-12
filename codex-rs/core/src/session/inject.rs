@@ -92,7 +92,7 @@ impl Session {
                 self.clear_reserved_idle_turn(&turn_state).await;
                 tracing::warn!("failed to create automatic idle turn context: {err}");
                 return Err(TryStartTurnIfIdleError::new(
-                    TryStartTurnIfIdleRejectionReason::TurnContextUnavailable,
+                    TryStartTurnIfIdleRejectionReason::Busy,
                     input,
                 ));
             }
