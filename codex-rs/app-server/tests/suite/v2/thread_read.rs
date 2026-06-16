@@ -355,6 +355,98 @@ async fn thread_turns_list_supports_requested_items_view() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_turns_list_full_includes_response_tool_call_items() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout_with_text_elements(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "inspect files",
+        vec![],
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
+    append_response_item(
+        rollout_path.as_path(),
+        "2025-01-05T12:01:00Z",
+        codex_protocol::models::ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".into(),
+            namespace: None,
+            arguments: r#"{"cmd":"ls -la"}"#.into(),
+            call_id: "call-1".into(),
+        },
+    )?;
+    append_response_item(
+        rollout_path.as_path(),
+        "2025-01-05T12:01:01Z",
+        codex_protocol::models::ResponseItem::FunctionCallOutput {
+            call_id: "call-1".into(),
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "directory listing".into(),
+            ),
+        },
+    )?;
+    append_agent_message(rollout_path.as_path(), "2025-01-05T12:02:00Z", "final")?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let full = read_single_turn_items_view(
+        &mut mcp,
+        conversation_id.as_str(),
+        Some(TurnItemsView::Full),
+    )
+    .await?;
+    assert_eq!(full.items_view, TurnItemsView::Full);
+    assert_eq!(full.items.len(), 4);
+    assert!(matches!(full.items[0], ThreadItem::UserMessage { .. }));
+    assert_eq!(
+        full.items[1],
+        ThreadItem::FunctionCall {
+            call_id: "call-1".into(),
+            name: "exec_command".into(),
+            namespace: None,
+            arguments: r#"{"cmd":"ls -la"}"#.into(),
+        }
+    );
+    assert_eq!(
+        full.items[2],
+        ThreadItem::FunctionCallOutput {
+            call_id: "call-1".into(),
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "directory listing".into(),
+            ),
+        }
+    );
+    assert_eq!(turn_agent_texts(std::slice::from_ref(&full)), vec!["final"]);
+
+    let summary = read_single_turn_items_view(
+        &mut mcp,
+        conversation_id.as_str(),
+        Some(TurnItemsView::Summary),
+    )
+    .await?;
+    assert_eq!(summary.items_view, TurnItemsView::Summary);
+    assert_eq!(summary.items.len(), 2);
+    assert_eq!(
+        turn_user_texts(std::slice::from_ref(&summary)),
+        vec!["inspect files"]
+    );
+    assert_eq!(
+        turn_agent_texts(std::slice::from_ref(&summary)),
+        vec!["final"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<()> {
     let codex_home = TempDir::new()?;
     let thread_id = codex_protocol::ThreadId::from_string("00000000-0000-4000-8000-000000000123")?;
@@ -1267,6 +1359,24 @@ fn append_agent_message(path: &Path, timestamp: &str, text: &str) -> anyhow::Res
                 phase: None,
                 memory_citation: None,
             }))?,
+        })
+    )?;
+    Ok(())
+}
+
+fn append_response_item(
+    path: &Path,
+    timestamp: &str,
+    item: codex_protocol::models::ResponseItem,
+) -> anyhow::Result<()> {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": serde_json::to_value(item)?,
         })
     )?;
     Ok(())

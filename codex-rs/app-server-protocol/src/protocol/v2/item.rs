@@ -18,6 +18,7 @@ use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
 use codex_protocol::memory_citation::MemoryCitationEntry as CoreMemoryCitationEntry;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -311,6 +312,45 @@ pub enum ThreadItem {
         #[ts(type = "number | null")]
         duration_ms: Option<i64>,
     },
+    #[serde(rename = "function_call", rename_all = "snake_case")]
+    #[ts(rename = "function_call", rename_all = "snake_case")]
+    FunctionCall {
+        call_id: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        namespace: Option<String>,
+        arguments: String,
+    },
+    #[serde(rename = "function_call_output", rename_all = "snake_case")]
+    #[ts(rename = "function_call_output", rename_all = "snake_case")]
+    FunctionCallOutput {
+        call_id: String,
+        #[ts(as = "codex_protocol::models::FunctionCallOutputBody")]
+        #[schemars(with = "codex_protocol::models::FunctionCallOutputBody")]
+        output: FunctionCallOutputPayload,
+    },
+    #[serde(rename = "custom_tool_call", rename_all = "snake_case")]
+    #[ts(rename = "custom_tool_call", rename_all = "snake_case")]
+    CustomToolCall {
+        call_id: String,
+        name: String,
+        input: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        status: Option<String>,
+    },
+    #[serde(rename = "custom_tool_call_output", rename_all = "snake_case")]
+    #[ts(rename = "custom_tool_call_output", rename_all = "snake_case")]
+    CustomToolCallOutput {
+        call_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        name: Option<String>,
+        #[ts(as = "codex_protocol::models::FunctionCallOutputBody")]
+        #[schemars(with = "codex_protocol::models::FunctionCallOutputBody")]
+        output: FunctionCallOutputPayload,
+    },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     CollabAgentToolCall {
@@ -393,6 +433,10 @@ impl ThreadItem {
             | ThreadItem::EnteredReviewMode { id, .. }
             | ThreadItem::ExitedReviewMode { id, .. }
             | ThreadItem::ContextCompaction { id, .. } => id,
+            ThreadItem::FunctionCall { call_id, .. }
+            | ThreadItem::FunctionCallOutput { call_id, .. }
+            | ThreadItem::CustomToolCall { call_id, .. }
+            | ThreadItem::CustomToolCallOutput { call_id, .. } => call_id,
         }
     }
 }

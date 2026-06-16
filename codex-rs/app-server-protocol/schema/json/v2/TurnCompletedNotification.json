@@ -407,6 +407,94 @@
       ],
       "type": "object"
     },
+    "FunctionCallOutputBody": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/definitions/FunctionCallOutputContentItem"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "FunctionCallOutputContentItem": {
+      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_text"
+              ],
+              "title": "InputTextFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_image"
+              ],
+              "title": "InputImageFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "title": "InputImageFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "encrypted_content": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "encrypted_content"
+              ],
+              "title": "EncryptedContentFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "encrypted_content",
+            "type"
+          ],
+          "title": "EncryptedContentFunctionCallOutputContentItem",
+          "type": "object"
+        }
+      ]
+    },
     "HookPromptFragment": {
       "properties": {
         "hookRunId": {
@@ -1053,6 +1141,128 @@
             "type"
           ],
           "title": "DynamicToolCallThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "arguments": {
+              "type": "string"
+            },
+            "call_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "function_call"
+              ],
+              "title": "FunctionCallThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "call_id",
+            "name",
+            "type"
+          ],
+          "title": "FunctionCallThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "output": {
+              "$ref": "#/definitions/FunctionCallOutputBody"
+            },
+            "type": {
+              "enum": [
+                "function_call_output"
+              ],
+              "title": "FunctionCallOutputThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call_id",
+            "output",
+            "type"
+          ],
+          "title": "FunctionCallOutputThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "input": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "custom_tool_call"
+              ],
+              "title": "CustomToolCallThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call_id",
+            "input",
+            "name",
+            "type"
+          ],
+          "title": "CustomToolCallThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output": {
+              "$ref": "#/definitions/FunctionCallOutputBody"
+            },
+            "type": {
+              "enum": [
+                "custom_tool_call_output"
+              ],
+              "title": "CustomToolCallOutputThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "call_id",
+            "output",
+            "type"
+          ],
+          "title": "CustomToolCallOutputThreadItem",
           "type": "object"
         },
         {

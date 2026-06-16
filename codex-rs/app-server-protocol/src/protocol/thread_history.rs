@@ -237,29 +237,78 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_response_item(&mut self, item: &codex_protocol::models::ResponseItem) {
-        let codex_protocol::models::ResponseItem::Message {
-            role, content, id, ..
-        } = item
-        else {
-            return;
-        };
+        match item {
+            codex_protocol::models::ResponseItem::Message {
+                role, content, id, ..
+            } => {
+                if role != "user" {
+                    return;
+                }
 
-        if role != "user" {
-            return;
+                let Some(hook_prompt) = parse_hook_prompt_message(id.as_ref(), content) else {
+                    return;
+                };
+
+                self.ensure_turn().items.push(ThreadItem::HookPrompt {
+                    id: hook_prompt.id,
+                    fragments: hook_prompt
+                        .fragments
+                        .into_iter()
+                        .map(crate::protocol::v2::HookPromptFragment::from)
+                        .collect(),
+                });
+            }
+            codex_protocol::models::ResponseItem::FunctionCall {
+                call_id,
+                name,
+                namespace,
+                arguments,
+                ..
+            } => {
+                self.ensure_turn().items.push(ThreadItem::FunctionCall {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    namespace: namespace.clone(),
+                    arguments: arguments.clone(),
+                });
+            }
+            codex_protocol::models::ResponseItem::FunctionCallOutput { call_id, output } => {
+                self.ensure_turn()
+                    .items
+                    .push(ThreadItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            codex_protocol::models::ResponseItem::CustomToolCall {
+                call_id,
+                name,
+                input,
+                status,
+                ..
+            } => {
+                self.ensure_turn().items.push(ThreadItem::CustomToolCall {
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    status: status.clone(),
+                });
+            }
+            codex_protocol::models::ResponseItem::CustomToolCallOutput {
+                call_id,
+                name,
+                output,
+            } => {
+                self.ensure_turn()
+                    .items
+                    .push(ThreadItem::CustomToolCallOutput {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        output: output.clone(),
+                    });
+            }
+            _ => {}
         }
-
-        let Some(hook_prompt) = parse_hook_prompt_message(id.as_ref(), content) else {
-            return;
-        };
-
-        self.ensure_turn().items.push(ThreadItem::HookPrompt {
-            id: hook_prompt.id,
-            fragments: hook_prompt
-                .fragments
-                .into_iter()
-                .map(crate::protocol::v2::HookPromptFragment::from)
-                .collect(),
-        });
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -1215,6 +1264,7 @@ mod tests {
     use codex_protocol::items::UserMessageItem as CoreUserMessageItem;
     use codex_protocol::items::build_hook_prompt_message;
     use codex_protocol::mcp::CallToolResult;
+    use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::ImageDetail;
     use codex_protocol::models::MessagePhase as CoreMessagePhase;
     use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
@@ -3337,6 +3387,83 @@ mod tests {
                     },
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn rebuilds_response_tool_call_items_from_rollout_response_items() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-a".into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "inspect files".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            })),
+            RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::FunctionCall {
+                id: None,
+                name: "exec_command".into(),
+                namespace: None,
+                arguments: r#"{"cmd":"ls -la"}"#.into(),
+                call_id: "call-1".into(),
+            }),
+            RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::FunctionCallOutput {
+                call_id: "call-1".into(),
+                output: FunctionCallOutputPayload::from_text("directory listing".into()),
+            }),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "done".into(),
+                phase: Some(CoreMessagePhase::FinalAnswer),
+                memory_citation: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-a".into(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            })),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ThreadItem::UserMessage {
+                    id: "item-1".into(),
+                    client_id: None,
+                    content: vec![UserInput::Text {
+                        text: "inspect files".into(),
+                        text_elements: Vec::new(),
+                    }],
+                },
+                ThreadItem::FunctionCall {
+                    call_id: "call-1".into(),
+                    name: "exec_command".into(),
+                    namespace: None,
+                    arguments: r#"{"cmd":"ls -la"}"#.into(),
+                },
+                ThreadItem::FunctionCallOutput {
+                    call_id: "call-1".into(),
+                    output: FunctionCallOutputPayload::from_text("directory listing".into()),
+                },
+                ThreadItem::AgentMessage {
+                    id: "item-2".into(),
+                    text: "done".into(),
+                    phase: Some(CoreMessagePhase::FinalAnswer),
+                    memory_citation: None,
+                },
+            ],
         );
     }
 

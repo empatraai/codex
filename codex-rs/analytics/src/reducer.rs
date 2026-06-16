@@ -353,6 +353,14 @@ impl TurnToolCounts {
             ThreadItem::FileChange { .. } => self.file_change += 1,
             ThreadItem::McpToolCall { .. } => self.mcp_tool_call += 1,
             ThreadItem::DynamicToolCall { .. } => self.dynamic_tool_call += 1,
+            ThreadItem::FunctionCall { name, .. } => {
+                if name == "exec_command" || name == "shell_command" {
+                    self.shell_command += 1;
+                } else {
+                    self.dynamic_tool_call += 1;
+                }
+            }
+            ThreadItem::CustomToolCall { .. } => self.dynamic_tool_call += 1,
             ThreadItem::CollabAgentToolCall { .. } => self.subagent_tool_call += 1,
             ThreadItem::WebSearch { .. } => self.web_search += 1,
             ThreadItem::ImageGeneration { .. } => self.image_generation += 1,
@@ -361,6 +369,8 @@ impl TurnToolCounts {
             | ThreadItem::AgentMessage { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
+            | ThreadItem::FunctionCallOutput { .. }
+            | ThreadItem::CustomToolCallOutput { .. }
             | ThreadItem::ImageView { .. }
             | ThreadItem::EnteredReviewMode { .. }
             | ThreadItem::ExitedReviewMode { .. }
@@ -1591,11 +1601,16 @@ fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
         | ThreadItem::CollabAgentToolCall { id, .. }
         | ThreadItem::WebSearch { id, .. }
         | ThreadItem::ImageGeneration { id, .. } => Some(id),
+        ThreadItem::FunctionCall { call_id, .. } | ThreadItem::CustomToolCall { call_id, .. } => {
+            Some(call_id)
+        }
         ThreadItem::UserMessage { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
+        | ThreadItem::FunctionCallOutput { .. }
+        | ThreadItem::CustomToolCallOutput { .. }
         | ThreadItem::ImageView { .. }
         | ThreadItem::EnteredReviewMode { .. }
         | ThreadItem::ExitedReviewMode { .. }

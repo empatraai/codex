@@ -16498,6 +16498,128 @@
           },
           {
             "properties": {
+              "arguments": {
+                "type": "string"
+              },
+              "call_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "function_call"
+                ],
+                "title": "FunctionCallThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "arguments",
+              "call_id",
+              "name",
+              "type"
+            ],
+            "title": "FunctionCallThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "output": {
+                "$ref": "#/definitions/v2/FunctionCallOutputBody"
+              },
+              "type": {
+                "enum": [
+                  "function_call_output"
+                ],
+                "title": "FunctionCallOutputThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "output",
+              "type"
+            ],
+            "title": "FunctionCallOutputThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "input": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "enum": [
+                  "custom_tool_call"
+                ],
+                "title": "CustomToolCallThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "input",
+              "name",
+              "type"
+            ],
+            "title": "CustomToolCallThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "call_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "output": {
+                "$ref": "#/definitions/v2/FunctionCallOutputBody"
+              },
+              "type": {
+                "enum": [
+                  "custom_tool_call_output"
+                ],
+                "title": "CustomToolCallOutputThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "call_id",
+              "output",
+              "type"
+            ],
+            "title": "CustomToolCallOutputThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
               "agentsStates": {
                 "additionalProperties": {
                   "$ref": "#/definitions/v2/CollabAgentState"
