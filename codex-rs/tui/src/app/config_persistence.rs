@@ -707,6 +707,7 @@ impl App {
             Some(ReasoningEffortConfig::High) => "high",
             Some(ReasoningEffortConfig::XHigh) => "xhigh",
             None | Some(ReasoningEffortConfig::None) => "default",
+            Some(effort) => effort.as_str(),
         }
     }
 

@@ -16,7 +16,6 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crossterm::event::KeyEvent;
-use strum::IntoEnumIterator;
 
 use super::ChatWidget;
 use crate::app_event::AppEvent;
@@ -168,6 +167,7 @@ fn effort_rank(effort: ReasoningEffortConfig) -> i32 {
         ReasoningEffortConfig::Medium => 3,
         ReasoningEffortConfig::High => 4,
         ReasoningEffortConfig::XHigh => 5,
+        _ => 6,
     }
 }
 

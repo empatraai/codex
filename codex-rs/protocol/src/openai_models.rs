@@ -7,11 +7,13 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
 use serde::de::DeserializeOwned;
-use strum::IntoEnumIterator;
 use strum_macros::Display;
 use strum_macros::EnumIter;
 use tracing::warn;
@@ -26,40 +28,97 @@ use crate::config_types::Verbosity;
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
 pub const SPEED_TIER_FAST: &str = "fast";
 
-/// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
-#[derive(
-    Debug,
-    Serialize,
-    Deserialize,
-    Default,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Display,
-    JsonSchema,
-    TS,
-    EnumIter,
-    Hash,
-)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-pub enum ReasoningEffort {
-    None,
-    Minimal,
-    Low,
-    #[default]
-    Medium,
-    High,
-    XHigh,
+/// Provider-specific reasoning effort identifier.
+///
+/// Codex has a few canonical efforts, but remote catalogs can expose provider-specific strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TS, Hash)]
+#[ts(type = "string")]
+pub struct ReasoningEffort(&'static str);
+
+#[allow(non_upper_case_globals)]
+impl ReasoningEffort {
+    pub const None: Self = Self("none");
+    pub const Minimal: Self = Self("minimal");
+    pub const Low: Self = Self("low");
+    pub const Medium: Self = Self("medium");
+    pub const High: Self = Self("high");
+    pub const XHigh: Self = Self("xhigh");
+
+    const CANONICAL: [Self; 6] = [
+        Self::None,
+        Self::Minimal,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+    ];
+
+    pub fn iter() -> impl Iterator<Item = Self> {
+        Self::CANONICAL.into_iter()
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0
+    }
+
+    fn from_owned(value: String) -> Self {
+        match value.as_str() {
+            "none" => Self::None,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::XHigh,
+            _ => Self(Box::leak(value.into_boxed_str())),
+        }
+    }
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Serialize for ReasoningEffort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::from_owned(String::deserialize(deserializer)?))
+    }
+}
+
+impl JsonSchema for ReasoningEffort {
+    fn schema_name() -> String {
+        "ReasoningEffort".to_string()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        <String>::json_schema(generator)
+    }
 }
 
 impl FromStr for ReasoningEffort {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_string()))
-            .map_err(|_| format!("invalid reasoning_effort: {s}"))
+        Ok(Self::from_owned(s.to_string()))
     }
 }
 
@@ -587,6 +646,7 @@ fn effort_rank(effort: ReasoningEffort) -> i32 {
         ReasoningEffort::Medium => 3,
         ReasoningEffort::High => 4,
         ReasoningEffort::XHigh => 5,
+        _ => 6,
     }
 }
 
@@ -658,10 +718,78 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_from_str_rejects_unknown_values() {
+    fn reasoning_effort_accepts_provider_specific_values() {
+        let effort: ReasoningEffort = "max".parse().expect("provider effort parses");
+
+        assert_eq!(effort.to_string(), "max");
         assert_eq!(
-            "unsupported".parse::<ReasoningEffort>(),
-            Err("invalid reasoning_effort: unsupported".to_string())
+            serde_json::to_value(effort).expect("serializes"),
+            serde_json::json!("max")
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_preset_accepts_provider_specific_values() {
+        let preset: ReasoningEffortPreset = serde_json::from_value(serde_json::json!({
+            "effort": "max",
+            "description": "max reasoning effort",
+        }))
+        .expect("provider effort preset parses");
+
+        assert_eq!(preset.effort.to_string(), "max");
+        assert_eq!(preset.description, "max reasoning effort");
+    }
+
+    #[test]
+    fn model_info_accepts_provider_specific_reasoning_efforts() {
+        let model: ModelInfo = serde_json::from_value(serde_json::json!({
+            "slug": "zai:glm-5.2",
+            "display_name": "GLM 5.2",
+            "description": null,
+            "default_reasoning_level": "max",
+            "supported_reasoning_levels": [
+                {"effort": "max", "description": "max reasoning effort"}
+            ],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 0,
+            "additional_speed_tiers": [],
+            "service_tiers": [],
+            "default_service_tier": null,
+            "availability_nux": null,
+            "upgrade": null,
+            "base_instructions": "base",
+            "model_messages": null,
+            "supports_reasoning_summaries": true,
+            "default_reasoning_summary": "none",
+            "support_verbosity": true,
+            "default_verbosity": "low",
+            "apply_patch_tool_type": "freeform",
+            "web_search_tool_type": "text",
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "supports_parallel_tool_calls": false,
+            "supports_image_detail_original": true,
+            "context_window": 128000,
+            "max_context_window": 128000,
+            "auto_compact_token_limit": null,
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text", "image"],
+            "supports_search_tool": false,
+            "tool_mode": null
+        }))
+        .expect("model catalog entry with provider effort parses");
+
+        assert_eq!(
+            model
+                .default_reasoning_level
+                .map(|effort| effort.to_string()),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            model.supported_reasoning_levels[0].effort.to_string(),
+            "max"
         );
     }
 

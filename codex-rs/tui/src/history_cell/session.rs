@@ -325,6 +325,7 @@ impl SessionHeaderHistoryCell {
             ReasoningEffortConfig::High => "high",
             ReasoningEffortConfig::XHigh => "xhigh",
             ReasoningEffortConfig::None => "none",
+            _ => effort.as_str(),
         })
     }
 }

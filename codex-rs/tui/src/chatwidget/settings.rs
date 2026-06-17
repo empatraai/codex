@@ -739,6 +739,7 @@ impl ChatWidget {
                     Some(ReasoningEffortConfig::High) => "high",
                     Some(ReasoningEffortConfig::XHigh) => "xhigh",
                     None | Some(ReasoningEffortConfig::None) => "default",
+                    Some(effort) => effort.as_str(),
                 };
                 message.push(' ');
                 message.push_str(reasoning_label);
