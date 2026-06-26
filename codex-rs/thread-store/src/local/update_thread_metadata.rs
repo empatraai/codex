@@ -27,6 +27,7 @@ use crate::ThreadMetadataPatch;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 use crate::UpdateThreadMetadataParams;
+use crate::error::reject_paginated_history_mode;
 use crate::local::read_thread;
 
 struct ResolvedRolloutPath {
@@ -53,6 +54,20 @@ pub(super) async fn update_thread_metadata(
     }
 
     let needs_rollout_compat = needs_rollout_compatibility_update(&patch);
+    if needs_rollout_compat {
+        // These explicit patches still write legacy rollout/name-index state after the
+        // SQLite update. Paginated threads must fail before either side is mutated.
+        let thread = read_thread::read_thread(
+            store,
+            ReadThreadParams {
+                thread_id,
+                include_archived: params.include_archived,
+                include_history: false,
+            },
+        )
+        .await?;
+        reject_paginated_history_mode(thread.history_mode)?;
+    }
     let require_sqlite_write = sqlite_write_failure_should_block(&patch);
     let updated = apply_metadata_update(
         store,
@@ -69,13 +84,14 @@ pub(super) async fn update_thread_metadata(
     if live_writer::rollout_path(store, thread_id).await.is_ok() {
         live_writer::persist_thread(store, thread_id).await?;
     }
-    let resolved_rollout_path =
+    let mut resolved_rollout_path =
         resolve_rollout_path(store, thread_id, params.include_archived).await?;
     let name = patch.name;
     let git_info = patch.git_info;
     if let Some(memory_mode) = patch.memory_mode {
         apply_thread_memory_mode(resolved_rollout_path.path.as_path(), thread_id, memory_mode)
             .await?;
+        refresh_resolved_rollout_path(&mut resolved_rollout_path).await;
     }
 
     let state_db_ctx = store.state_db().await;
@@ -143,6 +159,7 @@ pub(super) async fn update_thread_metadata(
             memory_mode.as_deref(),
         )
         .await?;
+        refresh_resolved_rollout_path(&mut resolved_rollout_path).await;
         apply_thread_git_info(store, thread_id, sha, branch, origin_url).await?;
     }
 
@@ -173,6 +190,12 @@ pub(super) async fn update_thread_metadata(
     Ok(thread)
 }
 
+async fn refresh_resolved_rollout_path(resolved: &mut ResolvedRolloutPath) {
+    if let Some(path) = codex_rollout::existing_rollout_path(resolved.path.as_path()).await {
+        resolved.path = path;
+    }
+}
+
 async fn apply_metadata_update(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -196,6 +219,7 @@ async fn apply_metadata_update(
                     .map_err(|err| ThreadStoreError::Internal {
                         message: format!("failed to read thread metadata for {thread_id}: {err}"),
                     })?;
+            let advance_recency_at = patch.advance_recency_at;
             if existing.is_none() && rollout_path.is_none() {
                 let resolved = resolve_rollout_path(store, thread_id, include_archived).await?;
                 rollout_path_archived = resolved.archived;
@@ -213,7 +237,8 @@ async fn apply_metadata_update(
                     patch.source.clone().unwrap_or(SessionSource::Unknown),
                 );
                 builder.model_provider = patch.model_provider.clone();
-                builder.thread_source = patch.thread_source.flatten();
+                builder.history_mode = patch.history_mode.unwrap_or_default();
+                builder.thread_source = patch.thread_source.clone().flatten();
                 builder.agent_nickname = patch.agent_nickname.clone().flatten();
                 builder.agent_role = patch.agent_role.clone().flatten();
                 builder.agent_path = patch.agent_path.clone().flatten();
@@ -252,8 +277,16 @@ async fn apply_metadata_update(
             if let Some(updated_at) = patch.updated_at {
                 metadata.updated_at = updated_at;
             }
+            if existing.is_none()
+                && let Some(recency_at) = advance_recency_at
+            {
+                metadata.recency_at = recency_at;
+            }
             if let Some(source) = patch.source {
                 metadata.source = enum_to_string(&source);
+            }
+            if let Some(history_mode) = patch.history_mode {
+                metadata.history_mode = history_mode;
             }
             if let Some(thread_source) = patch.thread_source {
                 metadata.thread_source = thread_source;
@@ -302,6 +335,18 @@ async fn apply_metadata_update(
                 .map_err(|err| ThreadStoreError::Internal {
                     message: format!("failed to update thread metadata for {thread_id}: {err}"),
                 })?;
+            if existing.is_some()
+                && let Some(recency_at) = advance_recency_at
+            {
+                state_db
+                    .touch_thread_recency_at(thread_id, recency_at)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to advance thread recency_at for {thread_id}: {err}"
+                        ),
+                    })?;
+            }
             if let Some(memory_mode) = patch.memory_mode {
                 state_db
                     .set_thread_memory_mode(thread_id, memory_mode_as_str(memory_mode))
@@ -386,6 +431,7 @@ fn has_observed_metadata_facts(patch: &ThreadMetadataPatch) -> bool {
         || patch.permission_profile.is_some()
         || patch.token_usage.is_some()
         || patch.first_user_message.is_some()
+        || patch.history_mode.is_some()
 }
 
 fn enum_to_string<T: serde::Serialize>(value: &T) -> String {
@@ -606,6 +652,7 @@ fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::ThreadHistoryMode;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
     use serde_json::json;
@@ -617,7 +664,6 @@ mod tests {
     use crate::ListThreadsParams;
     use crate::ResumeThreadParams;
     use crate::SortDirection;
-    use crate::ThreadEventPersistenceMode;
     use crate::ThreadMetadataPatch;
     use crate::ThreadPersistenceMetadata;
     use crate::ThreadSortKey;
@@ -626,6 +672,7 @@ mod tests {
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
+    use crate::local::test_support::write_session_file_with_history_mode;
 
     #[tokio::test]
     async fn update_thread_metadata_sets_name_on_active_rollout_and_indexes_name() {
@@ -692,6 +739,55 @@ mod tests {
             .await
             .expect("thread memory mode should be readable");
         assert_eq!(memory_mode.as_deref(), Some("disabled"));
+    }
+
+    #[tokio::test]
+    async fn update_thread_metadata_rejects_paginated_rollout_compatibility_writes() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let uuid = Uuid::from_u128(303);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-03T14-35-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("session file");
+        let runtime = codex_state::StateRuntime::init(
+            home.path().to_path_buf(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime.clone()));
+
+        assert!(matches!(
+            store
+                .update_thread_metadata(UpdateThreadMetadataParams {
+                    thread_id,
+                    patch: ThreadMetadataPatch {
+                        memory_mode: Some(ThreadMemoryMode::Disabled),
+                        ..Default::default()
+                    },
+                    include_archived: false,
+                })
+                .await
+                .expect_err("paginated rollout compatibility write should fail"),
+            ThreadStoreError::Unsupported {
+                operation: "paginated_threads"
+            }
+        ));
+
+        assert_eq!(last_rollout_item(path.as_path())["type"], "event_msg");
+        assert_eq!(
+            runtime
+                .get_thread_memory_mode(thread_id)
+                .await
+                .expect("thread memory mode should be readable")
+                .as_deref(),
+            Some("enabled")
+        );
     }
 
     #[tokio::test]
@@ -780,7 +876,6 @@ mod tests {
                 history: None,
                 include_archived: true,
                 metadata: test_thread_metadata(),
-                event_persistence_mode: ThreadEventPersistenceMode::Limited,
             })
             .await
             .expect("resume external live thread");
@@ -880,9 +975,10 @@ mod tests {
             .await
             .expect("sqlite metadata read")
             .expect("sqlite metadata");
+        let permission_profile: PermissionProfile = PermissionProfile::Disabled;
         assert_eq!(
             metadata.sandbox_policy,
-            serde_json::to_string(&PermissionProfile::Disabled).expect("serialize profile")
+            serde_json::to_string(&permission_profile).expect("serialize profile")
         );
     }
 
@@ -1470,6 +1566,7 @@ mod tests {
                 cwd_filters: Some(vec![workspace]),
                 archived: false,
                 search_term: None,
+                relation_filter: None,
                 use_state_db_only: true,
             })
             .await
@@ -1582,7 +1679,6 @@ mod tests {
                 history: None,
                 include_archived: true,
                 metadata: test_thread_metadata(),
-                event_persistence_mode: ThreadEventPersistenceMode::Limited,
             })
             .await
             .expect("resume archived live thread");

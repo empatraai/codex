@@ -11,6 +11,7 @@ use serde::de::value::Error as ValueDeserializerError;
 use serde::de::value::StrDeserializer;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 use wildmatch::WildMatchPattern;
 
 use super::requirements_exec_policy::RequirementsExecPolicy;
@@ -18,6 +19,7 @@ use super::requirements_exec_policy::RequirementsExecPolicyToml;
 use crate::Constrained;
 use crate::ConstraintError;
 use crate::ManagedHooksRequirementsToml;
+use crate::mcp_requirements::McpServerRequirement;
 use crate::mcp_types::AppToolApproval;
 use crate::permissions_toml::PermissionProfileToml;
 use crate::types::WindowsSandboxModeToml;
@@ -29,7 +31,6 @@ pub enum RequirementSource {
         domain: String,
         key: String,
     },
-    CloudRequirements,
     /// Multiple requirements layers contributed to the final value. Sources are
     /// stored highest-priority first, matching the order surfaced in errors.
     Composite {
@@ -86,9 +87,6 @@ impl fmt::Display for RequirementSource {
             RequirementSource::Unknown => write!(f, "<unspecified>"),
             RequirementSource::MdmManagedPreferences { domain, key } => {
                 write!(f, "MDM {domain}:{key}")
-            }
-            RequirementSource::CloudRequirements => {
-                write!(f, "cloud requirements")
             }
             RequirementSource::Composite { sources } => {
                 write!(f, "requirements layers: ")?;
@@ -153,11 +151,13 @@ pub struct ConfigRequirements {
     pub web_search_mode: ConstrainedWithSource<WebSearchMode>,
     pub allow_managed_hooks_only: Option<Sourced<bool>>,
     pub allow_appshots: Option<Sourced<bool>>,
+    pub allow_remote_control: Option<Sourced<bool>>,
     pub computer_use: Option<Sourced<ComputerUseRequirementsToml>>,
     pub feature_requirements: Option<Sourced<FeatureRequirementsToml>>,
     pub managed_hooks: Option<ConstrainedWithSource<ManagedHooksRequirementsToml>>,
     pub mcp_servers: Option<Sourced<BTreeMap<String, McpServerRequirement>>>,
     pub plugins: Option<Sourced<BTreeMap<String, PluginRequirementsToml>>>,
+    pub marketplaces: Option<Sourced<MarketplaceRequirementsToml>>,
     pub exec_policy: Option<Sourced<RequirementsExecPolicy>>,
     pub enforce_residency: ConstrainedWithSource<Option<ResidencyRequirement>>,
     /// Managed network constraints derived from requirements.
@@ -193,11 +193,13 @@ impl Default for ConfigRequirements {
             ),
             allow_managed_hooks_only: None,
             allow_appshots: None,
+            allow_remote_control: None,
             computer_use: None,
             feature_requirements: None,
             managed_hooks: None,
             mcp_servers: None,
             plugins: None,
+            marketplaces: None,
             exec_policy: None,
             enforce_residency: ConstrainedWithSource::new(
                 Constrained::allow_any(/*initial_value*/ None),
@@ -216,21 +218,44 @@ impl ConfigRequirements {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum McpServerIdentity {
-    Command { command: String },
-    Url { url: String },
-}
-
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct McpServerRequirement {
-    pub identity: McpServerIdentity,
-}
-
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginRequirementsToml {
     pub mcp_servers: Option<BTreeMap<String, McpServerRequirement>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceRequirementsToml {
+    pub restrict_to_allowed_sources: Option<bool>,
+    #[serde(default)]
+    pub allowed_sources: BTreeMap<String, MarketplaceAllowedSourceToml>,
+}
+
+impl MarketplaceRequirementsToml {
+    pub fn is_empty(&self) -> bool {
+        self.restrict_to_allowed_sources.is_none() && self.allowed_sources.is_empty()
+    }
+}
+
+/// Raw marketplace source rule whose active fields are interpreted after
+/// requirements composition.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MarketplaceAllowedSourceToml {
+    pub source: Option<MarketplaceAllowedSourceKind>,
+    pub url: Option<String>,
+    #[serde(rename = "ref")]
+    pub ref_name: Option<String>,
+    pub host_pattern: Option<String>,
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MarketplaceAllowedSourceKind {
+    Git,
+    HostPattern,
+    Local,
 }
 
 impl PluginRequirementsToml {
@@ -667,10 +692,11 @@ fn is_glob_metacharacter(ch: char) -> bool {
 }
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum WebSearchModeRequirement {
     Disabled,
     Cached,
+    Indexed,
     Live,
 }
 
@@ -679,6 +705,7 @@ impl From<WebSearchMode> for WebSearchModeRequirement {
         match mode {
             WebSearchMode::Disabled => WebSearchModeRequirement::Disabled,
             WebSearchMode::Cached => WebSearchModeRequirement::Cached,
+            WebSearchMode::Indexed => WebSearchModeRequirement::Indexed,
             WebSearchMode::Live => WebSearchModeRequirement::Live,
         }
     }
@@ -689,6 +716,7 @@ impl From<WebSearchModeRequirement> for WebSearchMode {
         match mode {
             WebSearchModeRequirement::Disabled => WebSearchMode::Disabled,
             WebSearchModeRequirement::Cached => WebSearchMode::Cached,
+            WebSearchModeRequirement::Indexed => WebSearchMode::Indexed,
             WebSearchModeRequirement::Live => WebSearchMode::Live,
         }
     }
@@ -699,6 +727,7 @@ impl fmt::Display for WebSearchModeRequirement {
         match self {
             WebSearchModeRequirement::Disabled => write!(f, "disabled"),
             WebSearchModeRequirement::Cached => write!(f, "cached"),
+            WebSearchModeRequirement::Indexed => write!(f, "indexed"),
             WebSearchModeRequirement::Live => write!(f, "live"),
         }
     }
@@ -826,11 +855,13 @@ pub struct ConfigRequirementsToml {
     pub allowed_approval_policies: Option<Vec<AskForApproval>>,
     pub allowed_approvals_reviewers: Option<Vec<ApprovalsReviewer>>,
     pub allowed_sandbox_modes: Option<Vec<SandboxModeRequirement>>,
-    pub allowed_permissions: Option<Vec<String>>,
+    pub allowed_permission_profiles: Option<BTreeMap<String, bool>>,
+    pub default_permissions: Option<String>,
     pub remote_sandbox_config: Option<Vec<RemoteSandboxConfigToml>>,
     pub allowed_web_search_modes: Option<Vec<WebSearchModeRequirement>>,
     pub allow_managed_hooks_only: Option<bool>,
     pub allow_appshots: Option<bool>,
+    pub allow_remote_control: Option<bool>,
     pub computer_use: Option<ComputerUseRequirementsToml>,
     pub windows: Option<WindowsRequirementsToml>,
     #[serde(rename = "features", alias = "feature_requirements")]
@@ -838,6 +869,7 @@ pub struct ConfigRequirementsToml {
     pub hooks: Option<ManagedHooksRequirementsToml>,
     pub mcp_servers: Option<BTreeMap<String, McpServerRequirement>>,
     pub plugins: Option<BTreeMap<String, PluginRequirementsToml>>,
+    pub marketplaces: Option<MarketplaceRequirementsToml>,
     pub apps: Option<AppsRequirementsToml>,
     pub rules: Option<RequirementsExecPolicyToml>,
     pub enforce_residency: Option<ResidencyRequirement>,
@@ -880,16 +912,19 @@ pub struct ConfigRequirementsWithSources {
     pub allowed_approval_policies: Option<Sourced<Vec<AskForApproval>>>,
     pub allowed_approvals_reviewers: Option<Sourced<Vec<ApprovalsReviewer>>>,
     pub allowed_sandbox_modes: Option<Sourced<Vec<SandboxModeRequirement>>>,
-    pub allowed_permissions: Option<Sourced<Vec<String>>>,
+    pub allowed_permission_profiles: Option<Sourced<BTreeMap<String, bool>>>,
+    pub default_permissions: Option<Sourced<String>>,
     pub allowed_web_search_modes: Option<Sourced<Vec<WebSearchModeRequirement>>>,
     pub allow_managed_hooks_only: Option<Sourced<bool>>,
     pub allow_appshots: Option<Sourced<bool>>,
+    pub allow_remote_control: Option<Sourced<bool>>,
     pub computer_use: Option<Sourced<ComputerUseRequirementsToml>>,
     pub windows: Option<Sourced<WindowsRequirementsToml>>,
     pub feature_requirements: Option<Sourced<FeatureRequirementsToml>>,
     pub hooks: Option<Sourced<ManagedHooksRequirementsToml>>,
     pub mcp_servers: Option<Sourced<BTreeMap<String, McpServerRequirement>>>,
     pub plugins: Option<Sourced<BTreeMap<String, PluginRequirementsToml>>>,
+    pub marketplaces: Option<Sourced<MarketplaceRequirementsToml>>,
     pub apps: Option<Sourced<AppsRequirementsToml>>,
     pub rules: Option<Sourced<RequirementsExecPolicyToml>>,
     pub enforce_residency: Option<Sourced<ResidencyRequirement>>,
@@ -920,17 +955,20 @@ impl ConfigRequirementsWithSources {
             allowed_approval_policies: _,
             allowed_approvals_reviewers: _,
             allowed_sandbox_modes: _,
-            allowed_permissions: _,
+            allowed_permission_profiles: _,
+            default_permissions: _,
             remote_sandbox_config: _,
             allowed_web_search_modes: _,
             allow_managed_hooks_only: _,
             allow_appshots: _,
+            allow_remote_control: _,
             computer_use: _,
             windows: _,
             feature_requirements: _,
             hooks: _,
             mcp_servers: _,
             plugins: _,
+            marketplaces: _,
             apps: _,
             rules: _,
             enforce_residency: _,
@@ -955,16 +993,19 @@ impl ConfigRequirementsWithSources {
                 allowed_approval_policies,
                 allowed_approvals_reviewers,
                 allowed_sandbox_modes,
-                allowed_permissions,
+                allowed_permission_profiles,
+                default_permissions,
                 allowed_web_search_modes,
                 allow_managed_hooks_only,
                 allow_appshots,
+                allow_remote_control,
                 computer_use,
                 windows,
                 feature_requirements,
                 hooks,
                 mcp_servers,
                 plugins,
+                marketplaces,
                 rules,
                 enforce_residency,
                 network,
@@ -987,16 +1028,19 @@ impl ConfigRequirementsWithSources {
             allowed_approval_policies,
             allowed_approvals_reviewers,
             allowed_sandbox_modes,
-            allowed_permissions,
+            allowed_permission_profiles,
+            default_permissions,
             allowed_web_search_modes,
             allow_managed_hooks_only,
             allow_appshots,
+            allow_remote_control,
             computer_use,
             windows,
             feature_requirements,
             hooks,
             mcp_servers,
             plugins,
+            marketplaces,
             apps,
             rules,
             enforce_residency,
@@ -1008,17 +1052,20 @@ impl ConfigRequirementsWithSources {
             allowed_approval_policies: allowed_approval_policies.map(|sourced| sourced.value),
             allowed_approvals_reviewers: allowed_approvals_reviewers.map(|sourced| sourced.value),
             allowed_sandbox_modes: allowed_sandbox_modes.map(|sourced| sourced.value),
-            allowed_permissions: allowed_permissions.map(|sourced| sourced.value),
+            allowed_permission_profiles: allowed_permission_profiles.map(|sourced| sourced.value),
+            default_permissions: default_permissions.map(|sourced| sourced.value),
             remote_sandbox_config: None,
             allowed_web_search_modes: allowed_web_search_modes.map(|sourced| sourced.value),
             allow_managed_hooks_only: allow_managed_hooks_only.map(|sourced| sourced.value),
             allow_appshots: allow_appshots.map(|sourced| sourced.value),
+            allow_remote_control: allow_remote_control.map(|sourced| sourced.value),
             computer_use: computer_use.map(|sourced| sourced.value),
             windows: windows.map(|sourced| sourced.value),
             feature_requirements: feature_requirements.map(|sourced| sourced.value),
             hooks: hooks.map(|sourced| sourced.value),
             mcp_servers: mcp_servers.map(|sourced| sourced.value),
             plugins: plugins.map(|sourced| sourced.value),
+            marketplaces: marketplaces.map(|sourced| sourced.value),
             apps: apps.map(|sourced| sourced.value),
             rules: rules.map(|sourced| sourced.value),
             enforce_residency: enforce_residency.map(|sourced| sourced.value),
@@ -1096,11 +1143,13 @@ impl ConfigRequirementsToml {
         self.allowed_approval_policies.is_none()
             && self.allowed_approvals_reviewers.is_none()
             && self.allowed_sandbox_modes.is_none()
-            && self.allowed_permissions.is_none()
+            && self.allowed_permission_profiles.is_none()
+            && self.default_permissions.is_none()
             && self.remote_sandbox_config.is_none()
             && self.allowed_web_search_modes.is_none()
             && self.allow_managed_hooks_only.is_none()
             && self.allow_appshots.is_none()
+            && self.allow_remote_control.is_none()
             && self
                 .computer_use
                 .as_ref()
@@ -1123,6 +1172,10 @@ impl ConfigRequirementsToml {
                 .as_ref()
                 .is_none_or(|plugins| plugins.values().all(PluginRequirementsToml::is_empty))
             && self
+                .marketplaces
+                .as_ref()
+                .is_none_or(MarketplaceRequirementsToml::is_empty)
+            && self
                 .apps
                 .as_ref()
                 .is_none_or(AppsRequirementsToml::is_empty)
@@ -1137,6 +1190,25 @@ impl ConfigRequirementsToml {
     }
 }
 
+fn validate_mcp_server_requirements(
+    requirements: &BTreeMap<String, McpServerRequirement>,
+    source: &RequirementSource,
+    plugin_name: Option<&str>,
+) -> Result<(), ConstraintError> {
+    for (server_name, requirement) in requirements {
+        requirement
+            .validate()
+            .map_err(|reason| ConstraintError::McpServerRequirementParse {
+                server_name: plugin_name
+                    .map(|plugin_name| format!("{plugin_name}/{server_name}"))
+                    .unwrap_or_else(|| server_name.clone()),
+                requirement_source: source.clone(),
+                reason,
+            })?;
+    }
+    Ok(())
+}
+
 impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
     type Error = ConstraintError;
 
@@ -1148,16 +1220,19 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             allowed_approval_policies,
             allowed_approvals_reviewers,
             allowed_sandbox_modes,
-            allowed_permissions: _,
+            allowed_permission_profiles: _,
+            default_permissions: _,
             allowed_web_search_modes,
             allow_managed_hooks_only,
             allow_appshots,
+            allow_remote_control,
             computer_use,
             windows,
             feature_requirements,
             hooks,
             mcp_servers,
             plugins,
+            marketplaces,
             apps: _apps,
             rules,
             enforce_residency,
@@ -1165,6 +1240,25 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             permissions,
             guardian_policy_config,
         } = toml;
+
+        if let Some(requirements) = &mcp_servers {
+            validate_mcp_server_requirements(
+                &requirements.value,
+                &requirements.source,
+                /*plugin_name*/ None,
+            )?;
+        }
+        if let Some(plugin_requirements) = &plugins {
+            for (plugin_name, plugin) in &plugin_requirements.value {
+                if let Some(requirements) = &plugin.mcp_servers {
+                    validate_mcp_server_requirements(
+                        requirements,
+                        &plugin_requirements.source,
+                        Some(plugin_name),
+                    )?;
+                }
+            }
+        }
 
         let approval_policy = match allowed_approval_policies {
             Some(Sourced {
@@ -1331,6 +1425,8 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
 
                 let initial_value = if accepted.contains(&WebSearchModeRequirement::Cached) {
                     WebSearchMode::Cached
+                } else if accepted.contains(&WebSearchModeRequirement::Indexed) {
+                    WebSearchMode::Indexed
                 } else if accepted.contains(&WebSearchModeRequirement::Live) {
                     WebSearchMode::Live
                 } else {
@@ -1430,11 +1526,13 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             web_search_mode,
             allow_managed_hooks_only,
             allow_appshots,
+            allow_remote_control,
             computer_use,
             feature_requirements,
             managed_hooks,
             mcp_servers,
             plugins,
+            marketplaces,
             exec_policy,
             enforce_residency,
             network,
@@ -1471,6 +1569,9 @@ pub fn sandbox_mode_requirement_for_permission_profile(
 mod tests {
     use super::*;
     use crate::HookEventsToml;
+    use crate::McpServerCommandMatcher;
+    use crate::McpServerIdentity;
+    use crate::McpServerValueMatcher;
     use anyhow::Result;
     use codex_execpolicy::Decision;
     use codex_execpolicy::Evaluation;
@@ -1510,38 +1611,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn composite_requirement_source_display_lists_sources_in_priority_order() {
-        let source = RequirementSource::composite([
-            RequirementSource::MdmManagedPreferences {
-                domain: "com.openai.codex".to_string(),
-                key: "requirements_toml_base64".to_string(),
-            },
-            RequirementSource::LegacyManagedConfigTomlFromMdm,
-        ]);
-
-        assert_eq!(
-            source.to_string(),
-            "requirements layers: MDM com.openai.codex:requirements_toml_base64, MDM managed_config.toml (legacy)"
-        );
-    }
-
     fn with_unknown_source(toml: ConfigRequirementsToml) -> ConfigRequirementsWithSources {
         let ConfigRequirementsToml {
             allowed_approval_policies,
             allowed_approvals_reviewers,
             allowed_sandbox_modes,
-            allowed_permissions,
+            allowed_permission_profiles,
+            default_permissions,
             remote_sandbox_config: _,
             allowed_web_search_modes,
             allow_managed_hooks_only,
             allow_appshots,
+            allow_remote_control,
             computer_use,
             windows,
             feature_requirements,
             hooks,
             mcp_servers,
             plugins,
+            marketplaces,
             apps,
             rules,
             enforce_residency,
@@ -1556,13 +1644,17 @@ mod tests {
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             allowed_sandbox_modes: allowed_sandbox_modes
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
-            allowed_permissions: allowed_permissions
+            allowed_permission_profiles: allowed_permission_profiles
+                .map(|value| Sourced::new(value, RequirementSource::Unknown)),
+            default_permissions: default_permissions
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             allowed_web_search_modes: allowed_web_search_modes
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             allow_managed_hooks_only: allow_managed_hooks_only
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             allow_appshots: allow_appshots
+                .map(|value| Sourced::new(value, RequirementSource::Unknown)),
+            allow_remote_control: allow_remote_control
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
             computer_use: computer_use.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             windows: windows.map(|value| Sourced::new(value, RequirementSource::Unknown)),
@@ -1571,6 +1663,7 @@ mod tests {
             hooks: hooks.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             mcp_servers: mcp_servers.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             plugins: plugins.map(|value| Sourced::new(value, RequirementSource::Unknown)),
+            marketplaces: marketplaces.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             apps: apps.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             rules: rules.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             enforce_residency: enforce_residency
@@ -1612,7 +1705,11 @@ mod tests {
     fn deserialize_managed_permission_profiles() -> Result<()> {
         let requirements: ConfigRequirementsToml = from_str(
             r#"
-                allowed_permissions = ["managed-standard", "managed-build"]
+                default_permissions = "managed-standard"
+
+                [allowed_permission_profiles]
+                managed-standard = true
+                managed-build = true
 
                 [permissions.managed-standard]
                 extends = ":workspace"
@@ -1623,11 +1720,15 @@ mod tests {
         )?;
 
         assert_eq!(
-            requirements.allowed_permissions,
-            Some(vec![
-                "managed-standard".to_string(),
-                "managed-build".to_string(),
-            ])
+            requirements.allowed_permission_profiles,
+            Some(BTreeMap::from([
+                ("managed-build".to_string(), true),
+                ("managed-standard".to_string(), true),
+            ]))
+        );
+        assert_eq!(
+            requirements.default_permissions,
+            Some("managed-standard".to_string())
         );
         let permissions = requirements
             .permissions
@@ -1690,6 +1791,19 @@ mod tests {
     }
 
     #[test]
+    fn allow_remote_control_false_is_still_configured() -> Result<()> {
+        let requirements: ConfigRequirementsToml = from_str(
+            r#"
+                allow_remote_control = false
+            "#,
+        )?;
+
+        assert_eq!(requirements.allow_remote_control, Some(false));
+        assert!(!requirements.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn deserialize_computer_use_requirements() -> Result<()> {
         let requirements: ConfigRequirementsToml = from_str(
             r#"
@@ -1740,17 +1854,20 @@ mod tests {
             allowed_approval_policies: Some(allowed_approval_policies.clone()),
             allowed_approvals_reviewers: Some(allowed_approvals_reviewers.clone()),
             allowed_sandbox_modes: Some(allowed_sandbox_modes.clone()),
-            allowed_permissions: Some(vec!["managed".to_string()]),
+            allowed_permission_profiles: Some(BTreeMap::from([("managed".to_string(), true)])),
+            default_permissions: Some("managed".to_string()),
             remote_sandbox_config: None,
             allowed_web_search_modes: Some(allowed_web_search_modes.clone()),
             allow_managed_hooks_only: Some(true),
             allow_appshots: Some(false),
+            allow_remote_control: Some(false),
             computer_use: Some(computer_use.clone()),
             windows: None,
             feature_requirements: Some(feature_requirements.clone()),
             hooks: None,
             mcp_servers: None,
             plugins: None,
+            marketplaces: None,
             apps: None,
             rules: None,
             enforce_residency: Some(enforce_residency),
@@ -1773,10 +1890,11 @@ mod tests {
                     source.clone(),
                 )),
                 allowed_sandbox_modes: Some(Sourced::new(allowed_sandbox_modes, source.clone(),)),
-                allowed_permissions: Some(Sourced::new(
-                    vec!["managed".to_string()],
+                allowed_permission_profiles: Some(Sourced::new(
+                    BTreeMap::from([("managed".to_string(), true)]),
                     source.clone(),
                 )),
+                default_permissions: Some(Sourced::new("managed".to_string(), source.clone(),)),
                 allowed_web_search_modes: Some(Sourced::new(
                     allowed_web_search_modes,
                     enforce_source.clone(),
@@ -1786,6 +1904,10 @@ mod tests {
                     enforce_source.clone(),
                 )),
                 allow_appshots: Some(Sourced::new(/*value*/ false, enforce_source.clone(),)),
+                allow_remote_control: Some(Sourced::new(
+                    /*value*/ false,
+                    enforce_source.clone(),
+                )),
                 computer_use: Some(Sourced::new(computer_use, enforce_source.clone())),
                 windows: None,
                 feature_requirements: Some(Sourced::new(
@@ -1795,6 +1917,7 @@ mod tests {
                 hooks: None,
                 mcp_servers: None,
                 plugins: None,
+                marketplaces: None,
                 apps: None,
                 rules: None,
                 enforce_residency: Some(Sourced::new(enforce_residency, enforce_source)),
@@ -1829,16 +1952,19 @@ mod tests {
                 )),
                 allowed_approvals_reviewers: None,
                 allowed_sandbox_modes: None,
-                allowed_permissions: None,
+                allowed_permission_profiles: None,
+                default_permissions: None,
                 allowed_web_search_modes: None,
                 allow_managed_hooks_only: None,
                 allow_appshots: None,
+                allow_remote_control: None,
                 computer_use: None,
                 windows: None,
                 feature_requirements: None,
                 hooks: None,
                 mcp_servers: None,
                 plugins: None,
+                marketplaces: None,
                 apps: None,
                 rules: None,
                 enforce_residency: None,
@@ -1881,16 +2007,19 @@ mod tests {
                 )),
                 allowed_approvals_reviewers: None,
                 allowed_sandbox_modes: None,
-                allowed_permissions: None,
+                allowed_permission_profiles: None,
+                default_permissions: None,
                 allowed_web_search_modes: None,
                 allow_managed_hooks_only: None,
                 allow_appshots: None,
+                allow_remote_control: None,
                 computer_use: None,
                 windows: None,
                 feature_requirements: None,
                 hooks: None,
                 mcp_servers: None,
                 plugins: None,
+                marketplaces: None,
                 apps: None,
                 rules: None,
                 enforce_residency: None,
@@ -1906,7 +2035,7 @@ mod tests {
     fn merge_unset_fields_ignores_blank_guardian_override() {
         let mut target = ConfigRequirementsWithSources::default();
         target.merge_unset_fields(
-            RequirementSource::CloudRequirements,
+            RequirementSource::LegacyManagedConfigTomlFromMdm,
             ConfigRequirementsToml {
                 guardian_policy_config: Some("   \n\t".to_string()),
                 ..Default::default()
@@ -2252,8 +2381,11 @@ allowed_approvals_reviewers = ["user"]
 
     #[test]
     fn merge_unset_fields_merges_apps_across_sources_with_enabled_evaluation() {
-        let higher_source = RequirementSource::CloudRequirements;
-        let lower_source = RequirementSource::LegacyManagedConfigTomlFromMdm;
+        let higher_source = RequirementSource::LegacyManagedConfigTomlFromMdm;
+        let lower_source = RequirementSource::MdmManagedPreferences {
+            domain: "com.openai.codex".to_string(),
+            key: "requirements_toml_base64".to_string(),
+        };
         let mut target = ConfigRequirementsWithSources::default();
 
         target.merge_unset_fields(
@@ -2294,7 +2426,7 @@ allowed_approvals_reviewers = ["user"]
         let mut target = ConfigRequirementsWithSources::default();
 
         target.merge_unset_fields(
-            RequirementSource::CloudRequirements,
+            RequirementSource::LegacyManagedConfigTomlFromMdm,
             ConfigRequirementsToml {
                 apps: Some(apps_requirements(&[])),
                 ..Default::default()
@@ -2415,7 +2547,7 @@ allowed_approvals_reviewers = ["user"]
             "#,
         )?;
 
-        let source_location = RequirementSource::CloudRequirements;
+        let source_location = RequirementSource::LegacyManagedConfigTomlFromMdm;
         let mut target = ConfigRequirementsWithSources::default();
         target.merge_unset_fields(source_location.clone(), source);
         let requirements = ConfigRequirements::try_from(target)?;
@@ -2466,17 +2598,6 @@ allowed_approvals_reviewers = ["user"]
                 .approval_policy
                 .can_set(&AskForApproval::UnlessTrusted)
                 .is_ok()
-        );
-        assert_eq!(
-            requirements
-                .approval_policy
-                .can_set(&AskForApproval::OnFailure),
-            Err(ConstraintError::InvalidValue {
-                field_name: "approval_policy",
-                candidate: "OnFailure".into(),
-                allowed: "[UnlessTrusted, OnRequest]".into(),
-                requirement_source: RequirementSource::Unknown,
-            })
         );
         assert!(
             requirements
@@ -2725,7 +2846,7 @@ allowed_approvals_reviewers = ["user"]
 
     #[test]
     fn remote_sandbox_config_first_match_overrides_top_level() -> Result<()> {
-        let source = RequirementSource::CloudRequirements;
+        let source = RequirementSource::LegacyManagedConfigTomlFromMdm;
         let mut requirements_toml: ConfigRequirementsToml = from_str(
             r#"
                 allowed_sandbox_modes = ["read-only"]
@@ -2816,7 +2937,7 @@ allowed_approvals_reviewers = ["user"]
 
     #[test]
     fn remote_sandbox_config_does_not_override_higher_precedence_sandbox_modes() -> Result<()> {
-        let high_source = RequirementSource::CloudRequirements;
+        let high_source = RequirementSource::LegacyManagedConfigTomlFromMdm;
         let mut high_precedence: ConfigRequirementsToml = from_str(
             r#"
                 allowed_sandbox_modes = ["read-only"]
@@ -2883,6 +3004,34 @@ allowed_approvals_reviewers = ["user"]
                 .can_set(&WebSearchMode::Cached)
                 .is_ok()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn allowed_web_search_modes_supports_indexed() -> Result<()> {
+        let config: ConfigRequirementsToml = from_str(
+            r#"
+                allowed_web_search_modes = ["indexed"]
+            "#,
+        )?;
+        let requirements: ConfigRequirements = with_unknown_source(config).try_into()?;
+
+        assert_eq!(requirements.web_search_mode.value(), WebSearchMode::Indexed);
+        for mode in [WebSearchMode::Disabled, WebSearchMode::Indexed] {
+            assert!(requirements.web_search_mode.can_set(&mode).is_ok());
+        }
+        for mode in [WebSearchMode::Cached, WebSearchMode::Live] {
+            assert_eq!(
+                requirements.web_search_mode.can_set(&mode),
+                Err(ConstraintError::InvalidValue {
+                    field_name: "web_search_mode",
+                    candidate: format!("{mode:?}"),
+                    allowed: "[Disabled, Indexed]".into(),
+                    requirement_source: RequirementSource::Unknown,
+                })
+            );
+        }
 
         Ok(())
     }
@@ -3003,7 +3152,7 @@ statusMessage = "checking"
     fn merge_unset_fields_does_not_overwrite_existing_hooks() -> Result<()> {
         let mut target = ConfigRequirementsWithSources::default();
         target.merge_unset_fields(
-            RequirementSource::CloudRequirements,
+            RequirementSource::LegacyManagedConfigTomlFromMdm,
             from_str::<ConfigRequirementsToml>(
                 r#"
 [hooks]
@@ -3047,7 +3196,7 @@ command = "python3 /system/hooks/pre.py"
         );
         assert_eq!(
             target.hooks.as_ref().map(|hooks| hooks.source.clone()),
-            Some(RequirementSource::CloudRequirements)
+            Some(RequirementSource::LegacyManagedConfigTomlFromMdm)
         );
         Ok(())
     }
@@ -3111,7 +3260,7 @@ command = "python3 /enterprise/hooks/pre.py"
             "/tmp/blocked.sock" = "deny"
         "#;
 
-        let source = RequirementSource::CloudRequirements;
+        let source = RequirementSource::LegacyManagedConfigTomlFromMdm;
         let mut requirements_with_sources = ConfigRequirementsWithSources::default();
         requirements_with_sources.merge_unset_fields(source.clone(), from_str(toml_str)?);
 
@@ -3184,7 +3333,7 @@ command = "python3 /enterprise/hooks/pre.py"
             allow_local_binding = false
         "#;
 
-        let source = RequirementSource::CloudRequirements;
+        let source = RequirementSource::LegacyManagedConfigTomlFromMdm;
         let mut requirements_with_sources = ConfigRequirementsWithSources::default();
         requirements_with_sources.merge_unset_fields(source.clone(), from_str(toml_str)?);
 
@@ -3335,6 +3484,9 @@ command = "python3 /enterprise/hooks/pre.py"
     #[test]
     fn deserialize_mcp_server_requirements() -> Result<()> {
         let toml_str = r#"
+            [mcp_servers.docs]
+            description = "ignored legacy field"
+
             [mcp_servers.docs.identity]
             command = "codex-mcp"
 
@@ -3350,7 +3502,7 @@ command = "python3 /enterprise/hooks/pre.py"
                 BTreeMap::from([
                     (
                         "docs".to_string(),
-                        McpServerRequirement {
+                        McpServerRequirement::Identity {
                             identity: McpServerIdentity::Command {
                                 command: "codex-mcp".to_string(),
                             },
@@ -3358,7 +3510,7 @@ command = "python3 /enterprise/hooks/pre.py"
                     ),
                     (
                         "remote".to_string(),
-                        McpServerRequirement {
+                        McpServerRequirement::Identity {
                             identity: McpServerIdentity::Url {
                                 url: "https://example.com/mcp".to_string(),
                             },
@@ -3368,6 +3520,74 @@ command = "python3 /enterprise/hooks/pre.py"
                 RequirementSource::Unknown,
             ))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_mcp_server_matcher_requirements() -> Result<()> {
+        let toml_str = r#"
+            [mcp_servers.internal_mcp_proxy.identity]
+            command = { executable = "company-cli", args = [
+                { match = "exact", value = "mcp" },
+                { match = "exact", value = "proxy" },
+                { match = "exact", value = "--server" },
+                { match = "regex", expression = '^https://[A-Za-z0-9-]+\.mcp\.internal\.example\.com(?::443)?(?:/.*)?$' },
+            ] }
+        "#;
+        let requirements: ConfigRequirements =
+            with_unknown_source(from_str(toml_str)?).try_into()?;
+
+        assert_eq!(
+            requirements.mcp_servers,
+            Some(Sourced::new(
+                BTreeMap::from([(
+                    "internal_mcp_proxy".to_string(),
+                    McpServerRequirement::Command(McpServerCommandMatcher {
+                        executable: "company-cli".to_string(),
+                        args: vec![
+                            McpServerValueMatcher::Exact {
+                                value: "mcp".to_string(),
+                            },
+                            McpServerValueMatcher::Exact {
+                                value: "proxy".to_string(),
+                            },
+                            McpServerValueMatcher::Exact {
+                                value: "--server".to_string(),
+                            },
+                            McpServerValueMatcher::Regex {
+                                expression: r"^https://[A-Za-z0-9-]+\.mcp\.internal\.example\.com(?::443)?(?:/.*)?$"
+                                    .to_string(),
+                            },
+                        ],
+                    }),
+                )]),
+                RequirementSource::Unknown,
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_mcp_server_requirement_regex_reports_the_server_name_and_source() -> Result<()> {
+        let toml_str = r#"
+            [mcp_servers.broken_rule.identity]
+            url = { match = "regex", expression = "[" }
+        "#;
+
+        let err = ConfigRequirements::try_from(with_unknown_source(from_str(toml_str)?))
+            .expect_err("invalid matcher regex should fail requirements normalization");
+        let ConstraintError::McpServerRequirementParse {
+            server_name,
+            requirement_source,
+            reason,
+        } = err
+        else {
+            panic!("unexpected error: {err:?}");
+        };
+
+        assert_eq!(server_name, "broken_rule");
+        assert_eq!(requirement_source, RequirementSource::Unknown);
+        assert!(reason.contains("invalid regex `[`"), "{reason}");
         Ok(())
     }
 
@@ -3392,7 +3612,7 @@ command = "python3 /enterprise/hooks/pre.py"
                         PluginRequirementsToml {
                             mcp_servers: Some(BTreeMap::from([(
                                 "remote".to_string(),
-                                McpServerRequirement {
+                                McpServerRequirement::Identity {
                                     identity: McpServerIdentity::Url {
                                         url: "https://example.com/mcp".to_string(),
                                     },
@@ -3405,7 +3625,7 @@ command = "python3 /enterprise/hooks/pre.py"
                         PluginRequirementsToml {
                             mcp_servers: Some(BTreeMap::from([(
                                 "sample".to_string(),
-                                McpServerRequirement {
+                                McpServerRequirement::Identity {
                                     identity: McpServerIdentity::Command {
                                         command: "sample-mcp".to_string(),
                                     },
@@ -3417,6 +3637,70 @@ command = "python3 /enterprise/hooks/pre.py"
                 RequirementSource::Unknown,
             ))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_plugin_mcp_server_matcher_requirement() -> Result<()> {
+        let toml_str = r#"
+            [plugins."sample@test".mcp_servers.internal_proxy.identity]
+            command = { executable = "company-cli", args = [
+                { match = "exact", value = "mcp" },
+                { match = "regex", expression = '^https://[a-z]+\.example\.com$' },
+            ] }
+        "#;
+        let requirements: ConfigRequirements =
+            with_unknown_source(from_str(toml_str)?).try_into()?;
+
+        assert_eq!(
+            requirements.plugins,
+            Some(Sourced::new(
+                BTreeMap::from([(
+                    "sample@test".to_string(),
+                    PluginRequirementsToml {
+                        mcp_servers: Some(BTreeMap::from([(
+                            "internal_proxy".to_string(),
+                            McpServerRequirement::Command(McpServerCommandMatcher {
+                                executable: "company-cli".to_string(),
+                                args: vec![
+                                    McpServerValueMatcher::Exact {
+                                        value: "mcp".to_string(),
+                                    },
+                                    McpServerValueMatcher::Regex {
+                                        expression: r"^https://[a-z]+\.example\.com$".to_string(),
+                                    },
+                                ],
+                            }),
+                        )])),
+                    },
+                )]),
+                RequirementSource::Unknown,
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_plugin_mcp_server_regex_reports_plugin_and_server_name() -> Result<()> {
+        let toml_str = r#"
+            [plugins."sample@test".mcp_servers.broken_rule.identity]
+            url = { match = "regex", expression = "[" }
+        "#;
+
+        let err = ConfigRequirements::try_from(with_unknown_source(from_str(toml_str)?))
+            .expect_err("invalid plugin MCP regex should fail requirements normalization");
+        let ConstraintError::McpServerRequirementParse {
+            server_name,
+            requirement_source,
+            reason,
+        } = err
+        else {
+            panic!("unexpected error: {err:?}");
+        };
+
+        assert_eq!(server_name, "sample@test/broken_rule");
+        assert_eq!(requirement_source, RequirementSource::Unknown);
+        assert!(reason.contains("invalid regex `[`"), "{reason}");
         Ok(())
     }
 

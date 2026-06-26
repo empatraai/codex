@@ -27,6 +27,7 @@ impl ChatWidget {
         }
         self.refresh_plan_mode_nudge();
         self.turn_lifecycle.reset_thread();
+        self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
         self.current_goal_status_indicator = None;
         self.current_goal_status = None;
@@ -79,7 +80,7 @@ impl ChatWidget {
         let default_model = session.model.clone();
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             Some(default_model.clone()),
-            Some(session.reasoning_effort),
+            Some(session.reasoning_effort.clone()),
             /*developer_instructions*/ None,
         );
         match session.collaboration_mode.as_deref() {
@@ -93,7 +94,7 @@ impl ChatWidget {
                     Some(&default_model),
                 );
                 if let Some(mask) = self.active_collaboration_mask.as_mut() {
-                    mask.reasoning_effort = Some(session.reasoning_effort);
+                    mask.reasoning_effort = Some(session.reasoning_effort.clone());
                 }
                 self.update_collaboration_mode_indicator();
                 self.refresh_plan_mode_nudge();

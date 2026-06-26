@@ -1,15 +1,17 @@
 use super::*;
-use codex_protocol::config_types::Personality;
 use crate::ModelsManagerConfig;
+use codex_protocol::config_types::Personality;
 use pretty_assertions::assert_eq;
 
 #[test]
 fn fallback_base_instructions_identify_empatra_studio_agent() {
     let model = model_info_from_slug("unknown-model");
 
-    assert!(model
-        .base_instructions
-        .starts_with("You are AI Агент в Студии от компании Эмпатра,"));
+    assert!(
+        model
+            .base_instructions
+            .starts_with("You are AI Агент в Студии от компании Эмпатра,")
+    );
     assert!(!model.base_instructions.contains("Codex CLI"));
     assert!(!model.base_instructions.contains("OpenAI"));
 }

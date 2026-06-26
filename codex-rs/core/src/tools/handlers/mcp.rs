@@ -15,11 +15,11 @@ use crate::tools::registry::PostToolUsePayload;
 use crate::tools::registry::PreToolUsePayload;
 use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolTelemetryTags;
-use crate::tools::tool_search_entry::ToolSearchInfo;
 use codex_mcp::ToolInfo;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::ToolName;
+use codex_tools::ToolSearchInfo;
 use codex_tools::ToolSearchSourceInfo;
 use codex_tools::ToolSpec;
 use codex_tools::mcp_tool_to_responses_api_tool;
@@ -64,7 +64,6 @@ fn ensure_mcp_prefix(name: &str) -> String {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for McpHandler {
     fn tool_name(&self) -> ToolName {
         self.tool_info.canonical_tool_name()
@@ -87,50 +86,6 @@ impl ToolExecutor<ToolInvocation> for McpHandler {
                 .unwrap_or(false)
     }
 
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
-        let ToolInvocation {
-            session,
-            turn,
-            call_id,
-            payload,
-            ..
-        } = invocation;
-
-        let payload = match payload {
-            ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(FunctionCallError::RespondToModel(
-                    "mcp handler received unsupported payload".to_string(),
-                ));
-            }
-        };
-
-        let started = Instant::now();
-        let result = handle_mcp_tool_call(
-            Arc::clone(&session),
-            &turn,
-            call_id.clone(),
-            self.tool_info.server_name.clone(),
-            self.tool_info.tool.name.to_string(),
-            self.hook_tool_name(),
-            payload,
-        )
-        .await;
-
-        Ok(boxed_tool_output(McpToolOutput {
-            result: result.result,
-            tool_input: result.tool_input,
-            wall_time: started.elapsed(),
-            original_image_detail_supported: can_request_original_image_detail(&turn.model_info),
-            truncation_policy: turn.truncation_policy,
-        }))
-    }
-}
-
-impl CoreToolRuntime for McpHandler {
     fn search_info(&self) -> Option<ToolSearchInfo> {
         let source_name = self
             .tool_info
@@ -157,6 +112,58 @@ impl CoreToolRuntime for McpHandler {
         )
     }
 
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl McpHandler {
+    async fn handle_call(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        let ToolInvocation {
+            session,
+            step_context,
+            call_id,
+            payload,
+            ..
+        } = invocation;
+        let turn = Arc::clone(&step_context.turn);
+
+        let payload = match payload {
+            ToolPayload::Function { arguments } => arguments,
+            _ => {
+                return Err(FunctionCallError::RespondToModel(
+                    "mcp handler received unsupported payload".to_string(),
+                ));
+            }
+        };
+
+        let started = Instant::now();
+        // TODO(sayan): Use StepContext for MCP file arguments when MCP follows dynamic environments.
+        let result = handle_mcp_tool_call(
+            Arc::clone(&session),
+            &step_context,
+            call_id.clone(),
+            self.tool_info.server_name.clone(),
+            self.tool_info.tool.name.to_string(),
+            self.hook_tool_name(),
+            payload,
+        )
+        .await;
+
+        Ok(boxed_tool_output(McpToolOutput {
+            result: result.result,
+            tool_input: result.tool_input,
+            wall_time: started.elapsed(),
+            original_image_detail_supported: can_request_original_image_detail(&turn.model_info),
+            truncation_policy: turn.model_info.truncation_policy.into(),
+        }))
+    }
+}
+
+impl CoreToolRuntime for McpHandler {
     fn telemetry_tags<'a>(
         &'a self,
         _invocation: &'a ToolInvocation,
@@ -312,6 +319,7 @@ mod search_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::tools::context::ToolCallSource;
     use crate::tools::hook_names::HookToolName;
@@ -335,12 +343,14 @@ mod tests {
             .to_string(),
         };
         let (session, turn) = make_session_and_context().await;
+        let turn = Arc::new(turn);
         let handler = McpHandler::new(tool_info("memory", "memory", "create_entities"))
             .expect("MCP tool spec should build");
         assert_eq!(
             handler.pre_tool_use_payload(&ToolInvocation {
                 session: session.into(),
-                turn: turn.into(),
+                step_context: StepContext::for_test(Arc::clone(&turn)),
+                turn,
                 cancellation_token: tokio_util::sync::CancellationToken::new(),
                 tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
                 call_id: "call-mcp-pre".to_string(),
@@ -366,13 +376,15 @@ mod tests {
             arguments: json!({ "message": "hello" }).to_string(),
         };
         let (session, turn) = make_session_and_context().await;
+        let turn = Arc::new(turn);
         let handler = McpHandler::new(tool_info("foo", "mcp__foo", "exec_command"))
             .expect("MCP tool spec should build");
 
         assert_eq!(
             handler.pre_tool_use_payload(&ToolInvocation {
                 session: session.into(),
-                turn: turn.into(),
+                step_context: StepContext::for_test(Arc::clone(&turn)),
+                turn,
                 cancellation_token: tokio_util::sync::CancellationToken::new(),
                 tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
                 call_id: "call-mcp-pre-builtin-like".to_string(),
@@ -393,6 +405,7 @@ mod tests {
             arguments: json!({ "message": "hello" }).to_string(),
         };
         let (session, turn) = make_session_and_context().await;
+        let turn = Arc::new(turn);
         let handler = McpHandler::new(tool_info("foo", "mcp__foo", "exec_command"))
             .expect("MCP tool spec should build");
 
@@ -400,7 +413,8 @@ mod tests {
             .with_updated_hook_input(
                 ToolInvocation {
                     session: session.into(),
-                    turn: turn.into(),
+                    step_context: StepContext::for_test(Arc::clone(&turn)),
+                    turn,
                     cancellation_token: tokio_util::sync::CancellationToken::new(),
                     tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
                     call_id: "call-mcp-rewrite-builtin-like".to_string(),
@@ -443,11 +457,13 @@ mod tests {
             truncation_policy: codex_utils_output_truncation::TruncationPolicy::Bytes(1024),
         };
         let (session, turn) = make_session_and_context().await;
+        let turn = Arc::new(turn);
         let handler = McpHandler::new(tool_info("filesystem", "filesystem", "read_file"))
             .expect("MCP tool spec should build");
         let invocation = ToolInvocation {
             session: session.into(),
-            turn: turn.into(),
+            step_context: StepContext::for_test(Arc::clone(&turn)),
+            turn,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-mcp-post".to_string(),

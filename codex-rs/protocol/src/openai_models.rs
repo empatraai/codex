@@ -3,17 +3,22 @@
 //! These types are serialized across core, TUI, app-server, and SDK boundaries, so field defaults
 //! are used to preserve compatibility when older payloads omit newly introduced attributes.
 
-use std::collections::HashMap;
+use std::fmt;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
 use schemars::r#gen::SchemaGenerator;
+use schemars::schema::InstanceType;
+use schemars::schema::Metadata;
 use schemars::schema::Schema;
+use schemars::schema::SchemaObject;
+use schemars::schema::StringValidation;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 use serde::de::DeserializeOwned;
+use serde::de::Error;
 use strum_macros::Display;
 use strum_macros::EnumIter;
 use tracing::warn;
@@ -24,83 +29,46 @@ use crate::config_types::ReasoningSummary;
 use crate::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use crate::config_types::ServiceTier;
 use crate::config_types::Verbosity;
+use crate::protocol::MultiAgentVersion;
 
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
 pub const SPEED_TIER_FAST: &str = "fast";
 
-/// Provider-specific reasoning effort identifier.
-///
-/// Codex has a few canonical efforts, but remote catalogs can expose provider-specific strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TS, Hash)]
+/// See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning
+#[derive(Debug, Default, Clone, PartialEq, Eq, TS, Hash)]
 #[ts(type = "string")]
-pub struct ReasoningEffort(&'static str);
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    #[default]
+    Medium,
+    High,
+    XHigh,
+    Ultra,
+    /// A model-defined effort value that this client does not know yet.
+    Custom(String),
+}
 
-#[allow(non_upper_case_globals)]
 impl ReasoningEffort {
-    pub const None: Self = Self("none");
-    pub const Minimal: Self = Self("minimal");
-    pub const Low: Self = Self("low");
-    pub const Medium: Self = Self("medium");
-    pub const High: Self = Self("high");
-    pub const XHigh: Self = Self("xhigh");
-
-    const CANONICAL: [Self; 6] = [
-        Self::None,
-        Self::Minimal,
-        Self::Low,
-        Self::Medium,
-        Self::High,
-        Self::XHigh,
-    ];
-
-    pub fn iter() -> impl Iterator<Item = Self> {
-        Self::CANONICAL.into_iter()
-    }
-
-    pub fn as_str(self) -> &'static str {
-        self.0
-    }
-
-    fn from_owned(value: String) -> Self {
-        match value.as_str() {
-            "none" => Self::None,
-            "minimal" => Self::Minimal,
-            "low" => Self::Low,
-            "medium" => Self::Medium,
-            "high" => Self::High,
-            "xhigh" => Self::XHigh,
-            _ => Self(Box::leak(value.into_boxed_str())),
+    /// Returns the exact value used on the wire.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Ultra => "ultra",
+            Self::Custom(effort) => effort,
         }
     }
 }
 
-impl Default for ReasoningEffort {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
-impl std::fmt::Display for ReasoningEffort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl Serialize for ReasoningEffort {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for ReasoningEffort {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Ok(Self::from_owned(String::deserialize(deserializer)?))
+impl fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -109,8 +77,40 @@ impl JsonSchema for ReasoningEffort {
         "ReasoningEffort".to_string()
     }
 
-    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
-        <String>::json_schema(generator)
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::Object(SchemaObject {
+            instance_type: Some(InstanceType::String.into()),
+            metadata: Some(Box::new(Metadata {
+                description: Some(
+                    "A non-empty reasoning effort value advertised by the model.".to_string(),
+                ),
+                ..Default::default()
+            })),
+            string: Some(Box::new(StringValidation {
+                min_length: Some(1),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+impl Serialize for ReasoningEffort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let effort = String::deserialize(deserializer)?;
+        effort.parse().map_err(D::Error::custom)
     }
 }
 
@@ -118,7 +118,17 @@ impl FromStr for ReasoningEffort {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::from_owned(s.to_string()))
+        match s {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "ultra" => Ok(Self::Ultra),
+            "" => Err("reasoning_effort must not be empty".to_string()),
+            effort => Ok(Self::Custom(effort.to_string())),
+        }
     }
 }
 
@@ -166,7 +176,6 @@ pub struct ReasoningEffortPreset {
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
 pub struct ModelUpgrade {
     pub id: String,
-    pub reasoning_effort_mapping: Option<HashMap<ReasoningEffort, ReasoningEffort>>,
     pub migration_config_key: String,
     pub model_link: Option<String>,
     pub upgrade_copy: Option<String>,
@@ -383,6 +392,9 @@ pub struct ModelInfo {
     /// context window when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compact_token_limit: Option<i64>,
+    /// Opaque identifier for compaction-compatible model configurations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comp_hash: Option<String>,
     /// Percentage of the context window considered usable for inputs, after
     /// reserving headroom for system prompts, tool overhead, and model output.
     #[serde(default = "default_effective_context_window_percent")]
@@ -398,12 +410,22 @@ pub struct ModelInfo {
     pub used_fallback_model_metadata: bool,
     #[serde(default)]
     pub supports_search_tool: bool,
+    #[serde(default)]
+    pub use_responses_lite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_review_model_override: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_model_selector"
     )]
     pub tool_mode: Option<ToolMode>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_model_selector"
+    )]
+    pub multi_agent_version: Option<MultiAgentVersion>,
 }
 
 impl ModelInfo {
@@ -551,9 +573,6 @@ impl From<ModelInfo> for ModelPreset {
             is_default: false, // default is the highest priority available model
             upgrade: info.upgrade.as_ref().map(|upgrade| ModelUpgrade {
                 id: upgrade.model.clone(),
-                reasoning_effort_mapping: reasoning_effort_mapping_from_presets(
-                    &info.supported_reasoning_levels,
-                ),
                 migration_config_key: info.slug.clone(),
                 // todo(aibrahim): add the model link here.
                 model_link: None,
@@ -621,48 +640,12 @@ impl ModelPreset {
     }
 }
 
-fn reasoning_effort_mapping_from_presets(
-    presets: &[ReasoningEffortPreset],
-) -> Option<HashMap<ReasoningEffort, ReasoningEffort>> {
-    if presets.is_empty() {
-        return None;
-    }
-
-    // Map every canonical effort to the closest supported effort for the new model.
-    let supported: Vec<ReasoningEffort> = presets.iter().map(|p| p.effort).collect();
-    let mut map = HashMap::new();
-    for effort in ReasoningEffort::iter() {
-        let nearest = nearest_effort(effort, &supported);
-        map.insert(effort, nearest);
-    }
-    Some(map)
-}
-
-fn effort_rank(effort: ReasoningEffort) -> i32 {
-    match effort {
-        ReasoningEffort::None => 0,
-        ReasoningEffort::Minimal => 1,
-        ReasoningEffort::Low => 2,
-        ReasoningEffort::Medium => 3,
-        ReasoningEffort::High => 4,
-        ReasoningEffort::XHigh => 5,
-        _ => 6,
-    }
-}
-
-fn nearest_effort(target: ReasoningEffort, supported: &[ReasoningEffort]) -> ReasoningEffort {
-    let target_rank = effort_rank(target);
-    supported
-        .iter()
-        .copied()
-        .min_by_key(|candidate| (effort_rank(*candidate) - target_rank).abs())
-        .unwrap_or(target)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use serde_json::from_str;
+    use serde_json::to_string;
 
     fn test_model(spec: Option<ModelMessages>) -> ModelInfo {
         ModelInfo {
@@ -694,12 +677,16 @@ mod tests {
             context_window: None,
             max_context_window: None,
             auto_compact_token_limit: None,
+            comp_hash: None,
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
             used_fallback_model_metadata: false,
             supports_search_tool: false,
+            use_responses_lite: false,
+            auto_review_model_override: None,
             tool_mode: None,
+            multi_agent_version: None,
         }
     }
 
@@ -712,84 +699,63 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_known_values() {
-        assert_eq!("high".parse(), Ok(ReasoningEffort::High));
-        assert_eq!("minimal".parse(), Ok(ReasoningEffort::Minimal));
-    }
+    fn reasoning_effort_accepts_known_and_custom_values() {
+        let custom = ReasoningEffort::Custom("max".to_string());
+        let deserialized = from_str::<ReasoningEffort>(r#""max""#)
+            .expect("custom reasoning effort should deserialize");
+        let serialized = to_string(&custom).expect("custom reasoning effort should serialize");
+        let serialized_ultra = to_string(&ReasoningEffort::Ultra).expect("Ultra should serialize");
 
-    #[test]
-    fn reasoning_effort_accepts_provider_specific_values() {
-        let effort: ReasoningEffort = "max".parse().expect("provider effort parses");
-
-        assert_eq!(effort.to_string(), "max");
         assert_eq!(
-            serde_json::to_value(effort).expect("serializes"),
-            serde_json::json!("max")
+            (
+                "high".parse(),
+                "ultra".parse(),
+                "max".parse(),
+                deserialized,
+                serialized,
+                serialized_ultra,
+                custom.to_string(),
+            ),
+            (
+                Ok(ReasoningEffort::High),
+                Ok(ReasoningEffort::Ultra),
+                Ok(custom.clone()),
+                custom,
+                r#""max""#.to_string(),
+                r#""ultra""#.to_string(),
+                "max".to_string(),
+            )
         );
     }
 
     #[test]
-    fn reasoning_effort_preset_accepts_provider_specific_values() {
-        let preset: ReasoningEffortPreset = serde_json::from_value(serde_json::json!({
-            "effort": "max",
-            "description": "max reasoning effort",
-        }))
-        .expect("provider effort preset parses");
-
-        assert_eq!(preset.effort.to_string(), "max");
-        assert_eq!(preset.description, "max reasoning effort");
+    fn reasoning_effort_rejects_empty_values() {
+        assert_eq!(
+            "".parse::<ReasoningEffort>(),
+            Err("reasoning_effort must not be empty".to_string())
+        );
     }
 
     #[test]
-    fn model_info_accepts_provider_specific_reasoning_efforts() {
-        let model: ModelInfo = serde_json::from_value(serde_json::json!({
-            "slug": "zai:glm-5.2",
-            "display_name": "GLM 5.2",
-            "description": null,
-            "default_reasoning_level": "max",
-            "supported_reasoning_levels": [
-                {"effort": "max", "description": "max reasoning effort"}
-            ],
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "supported_in_api": true,
-            "priority": 0,
-            "additional_speed_tiers": [],
-            "service_tiers": [],
-            "default_service_tier": null,
-            "availability_nux": null,
-            "upgrade": null,
-            "base_instructions": "base",
-            "model_messages": null,
-            "supports_reasoning_summaries": true,
-            "default_reasoning_summary": "none",
-            "support_verbosity": true,
-            "default_verbosity": "low",
-            "apply_patch_tool_type": "freeform",
-            "web_search_tool_type": "text",
-            "truncation_policy": {"mode": "tokens", "limit": 10000},
-            "supports_parallel_tool_calls": false,
-            "supports_image_detail_original": true,
-            "context_window": 128000,
-            "max_context_window": 128000,
-            "auto_compact_token_limit": null,
-            "effective_context_window_percent": 95,
-            "experimental_supported_tools": [],
-            "input_modalities": ["text", "image"],
-            "supports_search_tool": false,
-            "tool_mode": null
-        }))
-        .expect("model catalog entry with provider effort parses");
+    fn reasoning_effort_json_schema_is_an_open_string() {
+        let mut effort_generator = SchemaGenerator::default();
 
         assert_eq!(
-            model
-                .default_reasoning_level
-                .map(|effort| effort.to_string()),
-            Some("max".to_string())
-        );
-        assert_eq!(
-            model.supported_reasoning_levels[0].effort.to_string(),
-            "max"
+            ReasoningEffort::json_schema(&mut effort_generator),
+            Schema::Object(SchemaObject {
+                instance_type: Some(InstanceType::String.into()),
+                metadata: Some(Box::new(Metadata {
+                    description: Some(
+                        "A non-empty reasoning effort value advertised by the model.".to_string(),
+                    ),
+                    ..Default::default()
+                })),
+                string: Some(Box::new(StringValidation {
+                    min_length: Some(1),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
         );
     }
 
@@ -985,6 +951,9 @@ mod tests {
         assert!(!model.supports_image_detail_original);
         assert_eq!(model.web_search_tool_type, WebSearchToolType::Text);
         assert!(!model.supports_search_tool);
+        assert!(!model.use_responses_lite);
+        assert_eq!(model.comp_hash, None);
+        assert_eq!(model.auto_review_model_override, None);
         assert_eq!(model.tool_mode, None);
     }
 
@@ -1023,6 +992,22 @@ mod tests {
             .as_object()
             .expect("model info should be an object");
         assert!(!object.contains_key("tool_mode"));
+    }
+
+    #[test]
+    fn model_info_treats_unknown_multi_agent_version_as_omitted() {
+        let mut value =
+            serde_json::to_value(test_model(/*spec*/ None)).expect("serialize test model");
+        let object = value
+            .as_object_mut()
+            .expect("model info should be an object");
+        object.insert(
+            "multi_agent_version".to_string(),
+            serde_json::Value::String("future_multi_agent_version".to_string()),
+        );
+        let model = serde_json::from_value::<ModelInfo>(value).expect("deserialize model info");
+
+        assert_eq!(model.multi_agent_version, None);
     }
 
     #[test]

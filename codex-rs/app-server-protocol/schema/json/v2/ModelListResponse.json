@@ -185,6 +185,8 @@
       "type": "object"
     },
     "ReasoningEffort": {
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
       "type": "string"
     },
     "ReasoningEffortOption": {
