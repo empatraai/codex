@@ -188,6 +188,32 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
                 .unwrap_or_else(|| tool.clone());
             vec![format!("tool: {name} · {status:?}").dim().into()]
         }
+        ThreadItem::FunctionCall {
+            name, namespace, ..
+        } => {
+            let name = namespace
+                .as_ref()
+                .map(|namespace| format!("{namespace}/{name}"))
+                .unwrap_or_else(|| name.clone());
+            vec![format!("function call: {name}").dim().into()]
+        }
+        ThreadItem::FunctionCallOutput { call_id, .. } => {
+            vec![format!("function call output: {call_id}").dim().into()]
+        }
+        ThreadItem::CustomToolCall { name, status, .. } => {
+            let status = status
+                .as_ref()
+                .map(|status| format!(" · {status}"))
+                .unwrap_or_default();
+            vec![format!("custom tool call: {name}{status}").dim().into()]
+        }
+        ThreadItem::CustomToolCallOutput { name, call_id, .. } => {
+            let name = name
+                .as_ref()
+                .map(|name| format!("{name} · "))
+                .unwrap_or_default();
+            vec![format!("custom tool output: {name}{call_id}").dim().into()]
+        }
         ThreadItem::CollabAgentToolCall { tool, status, .. } => {
             vec![format!("agent tool: {tool:?} · {status:?}").dim().into()]
         }
