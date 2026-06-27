@@ -191,6 +191,10 @@ impl ChatWidget {
                 agents_states,
             }),
             ThreadItem::DynamicToolCall { .. } => {}
+            ThreadItem::FunctionCall { .. }
+            | ThreadItem::FunctionCallOutput { .. }
+            | ThreadItem::CustomToolCall { .. }
+            | ThreadItem::CustomToolCallOutput { .. } => {}
         }
 
         if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {

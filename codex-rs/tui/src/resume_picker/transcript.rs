@@ -215,6 +215,18 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         ThreadItem::ContextCompaction { .. } => {
             vec!["context compacted".dim().into()]
         }
+        ThreadItem::FunctionCall { name, arguments, .. } => {
+            vec![format!("function call: {name} · {arguments}").dim().into()]
+        }
+        ThreadItem::FunctionCallOutput { output, .. } => {
+            vec![format!("function output: {output:?}").dim().into()]
+        }
+        ThreadItem::CustomToolCall { name, status, .. } => {
+            vec![format!("custom tool: {name} · {status:?}").dim().into()]
+        }
+        ThreadItem::CustomToolCallOutput { name, output, .. } => {
+            vec![format!("custom tool output: {name:?} · {output:?}").dim().into()]
+        }
         ThreadItem::UserMessage { .. }
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
