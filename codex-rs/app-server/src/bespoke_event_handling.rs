@@ -888,23 +888,10 @@ pub(crate) async fn apply_bespoke_event_handling(
             );
             outgoing.send_server_notification(notification).await;
         }
-        EventMsg::SubAgentActivity(activity) => {
-            if activity.kind == SubAgentActivityKind::Interrupted
-                && thread_manager
-                    .get_thread(activity.agent_thread_id)
-                    .await
-                    .is_err()
-            {
-                thread_watch_manager
-                    .remove_thread(&activity.agent_thread_id.to_string())
-                    .await;
-            }
-            let notification = item_event_to_server_notification(
-                EventMsg::SubAgentActivity(activity),
-                &conversation_id.to_string(),
-                &event_turn_id,
-            );
-            outgoing.send_server_notification(notification).await;
+        EventMsg::SubAgentActivity(_) => {
+            // Deprecated sub-agent activity events are still fanned out for raw-event and
+            // rollout compatibility consumers. App-server v2 receives the canonical
+            // SubAgentActivity item lifecycle instead.
         }
         EventMsg::CollabCloseEnd(end_event) => {
             if thread_manager
@@ -2214,7 +2201,6 @@ mod tests {
     use codex_protocol::protocol::RateLimitWindow;
     use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SessionSource;
-    use codex_protocol::protocol::SubAgentActivityEvent;
     use codex_protocol::protocol::TokenUsage;
     use codex_protocol::protocol::TokenUsageInfo;
     use codex_protocol::protocol::UserMessageEvent;
@@ -3437,13 +3423,17 @@ mod tests {
         apply_bespoke_event_handling(
             Event {
                 id: "turn-1".to_string(),
-                msg: EventMsg::SubAgentActivity(SubAgentActivityEvent {
-                    event_id: "activity-1".to_string(),
-                    occurred_at_ms: 42,
-                    agent_thread_id: child_thread_id,
-                    agent_path: AgentPath::try_from("/root/worker")
-                        .expect("agent path should parse"),
-                    kind: SubAgentActivityKind::Interrupted,
+                msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id: conversation_id,
+                    turn_id: "turn-1".to_string(),
+                    item: CoreTurnItem::SubAgentActivity(SubAgentActivityItem {
+                        id: "activity-1".to_string(),
+                        kind: SubAgentActivityKind::Interrupted,
+                        agent_thread_id: child_thread_id,
+                        agent_path: AgentPath::try_from("/root/worker")
+                            .expect("agent path should parse"),
+                    }),
+                    completed_at_ms: 42,
                 }),
             },
             conversation_id,
