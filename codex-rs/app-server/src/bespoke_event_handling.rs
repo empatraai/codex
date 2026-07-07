@@ -911,7 +911,8 @@ pub(crate) async fn apply_bespoke_event_handling(
             outgoing.send_server_notification(notification).await;
         }
         EventMsg::ContextCompacted(..) => {
-            // Core still fans out this deprecated event for legacy clients;
+            // Core still fans out this deprecated event for raw-event and rollout compatibility
+            // consumers;
             // v2 clients receive the canonical ContextCompaction item instead.
         }
         EventMsg::DeprecationNotice(event) => {
@@ -1090,7 +1091,8 @@ pub(crate) async fn apply_bespoke_event_handling(
             .await;
         }
         EventMsg::PatchApplyBegin(_) | EventMsg::PatchApplyEnd(_) => {
-            // Core still fans out these deprecated events for legacy clients;
+            // Core still fans out these deprecated events for raw-event and rollout compatibility
+            // consumers;
             // v2 clients receive the canonical FileChange item instead.
         }
         EventMsg::ExecCommandBegin(exec_command_begin_event) => {
