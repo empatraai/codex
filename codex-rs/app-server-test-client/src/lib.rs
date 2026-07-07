@@ -364,9 +364,8 @@ pub async fn run() -> Result<()> {
             .await
         }
         CliCommand::ThreadResume { thread_id } => {
-            ensure_dynamic_tools_unused(&dynamic_tools, "thread-resume")?;
             let endpoint = resolve_endpoint(codex_bin, url)?;
-            thread_resume_follow(&endpoint, &config_overrides, thread_id).await
+            thread_resume_follow(&endpoint, &config_overrides, thread_id, &dynamic_tools).await
         }
         CliCommand::Watch => {
             ensure_dynamic_tools_unused(&dynamic_tools, "watch")?;
@@ -897,14 +896,13 @@ async fn resume_message_v2(
     user_message: String,
     dynamic_tools: &Option<Vec<DynamicToolSpec>>,
 ) -> Result<()> {
-    ensure_dynamic_tools_unused(dynamic_tools, "resume-message-v2")?;
-
     with_client("resume-message-v2", endpoint, config_overrides, |client| {
         let initialize = client.initialize()?;
         println!("< initialize response: {initialize:?}");
 
         let resume_response = client.thread_resume(ThreadResumeParams {
             thread_id,
+            dynamic_tools: dynamic_tools.clone(),
             ..Default::default()
         })?;
         println!("< thread/resume response: {resume_response:?}");
@@ -931,6 +929,7 @@ async fn thread_resume_follow(
     endpoint: &Endpoint,
     config_overrides: &[String],
     thread_id: String,
+    dynamic_tools: &Option<Vec<DynamicToolSpec>>,
 ) -> Result<()> {
     with_client("thread-resume", endpoint, config_overrides, |client| {
         let initialize = client.initialize()?;
@@ -938,6 +937,7 @@ async fn thread_resume_follow(
 
         let resume_response = client.thread_resume(ThreadResumeParams {
             thread_id,
+            dynamic_tools: dynamic_tools.clone(),
             ..Default::default()
         })?;
         println!("< thread/resume response: {resume_response:?}");
@@ -1447,7 +1447,7 @@ fn ensure_dynamic_tools_unused(
 ) -> Result<()> {
     if dynamic_tools.is_some() {
         bail!(
-            "dynamic tools are only supported for v2 thread/start; remove --dynamic-tools for {command} or use send-message-v2"
+            "dynamic tools are only supported for v2 thread/start and thread/resume; remove --dynamic-tools for {command} or use send-message-v2, resume-message-v2, or thread-resume"
         );
     }
     Ok(())

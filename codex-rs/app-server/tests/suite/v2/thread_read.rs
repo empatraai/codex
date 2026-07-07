@@ -495,21 +495,24 @@ async fn thread_turns_list_full_includes_response_tool_call_items() -> Result<()
             namespace: None,
             arguments: r#"{"cmd":"ls -la"}"#.into(),
             call_id: "call-1".into(),
+            internal_chat_message_metadata_passthrough: None,
         },
     )?;
     append_response_item(
         rollout_path.as_path(),
         "2025-01-05T12:01:01Z",
         codex_protocol::models::ResponseItem::FunctionCallOutput {
+            id: None,
             call_id: "call-1".into(),
             output: codex_protocol::models::FunctionCallOutputPayload::from_text(
                 "directory listing".into(),
             ),
+            internal_chat_message_metadata_passthrough: None,
         },
     )?;
     append_agent_message(rollout_path.as_path(), "2025-01-05T12:02:00Z", "final")?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let full = read_single_turn_items_view(

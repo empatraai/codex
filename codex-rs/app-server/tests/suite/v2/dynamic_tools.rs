@@ -1,8 +1,10 @@
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::TestAppServer;
+use app_test_support::create_fake_rollout;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+use app_test_support::rollout_path;
 use app_test_support::to_response;
 use codex_app_server_protocol::DynamicToolCallOutputContentItem;
 use codex_app_server_protocol::DynamicToolCallParams;
@@ -19,6 +21,8 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -316,6 +320,97 @@ async fn thread_start_rejects_invalid_dynamic_tool_inputs() -> Result<()> {
             error.error.message
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_dynamic_tools_override_rollout_tools_for_next_turn() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let thread_id = create_fake_rollout(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let input_schema = json!({
+        "type": "object",
+        "properties": {
+            "ticket_id": { "type": "string" }
+        },
+        "required": ["ticket_id"],
+        "additionalProperties": false,
+    });
+    let dynamic_tool = DynamicToolSpec::Function(DynamicToolFunctionSpec {
+        name: "resume_lookup".to_string(),
+        description: "Look up a resumed thread ticket".to_string(),
+        input_schema: input_schema.clone(),
+        defer_loading: false,
+    });
+
+    let resume_req = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            path: Some(rollout_path(codex_home.path(), filename_ts, &thread_id)),
+            dynamic_tools: Some(vec![dynamic_tool]),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_req)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            client_user_message_id: None,
+            input: vec![V2UserInput::Text {
+                text: "Look up the resumed ticket".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _turn: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    let function = find_tool(&bodies[0], "resume_lookup")
+        .context("expected resume dynamic tool in model request")?;
+    assert_eq!(
+        function,
+        &json!({
+            "type": "function",
+            "name": "resume_lookup",
+            "description": "Look up a resumed thread ticket",
+            "strict": false,
+            "parameters": input_schema,
+        })
+    );
 
     Ok(())
 }

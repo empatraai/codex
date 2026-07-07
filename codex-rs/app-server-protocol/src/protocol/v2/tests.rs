@@ -165,6 +165,29 @@ fn thread_resume_params_accept_turns_page_bootstrap() {
 }
 
 #[test]
+fn thread_resume_params_accept_dynamic_tools() {
+    let params = serde_json::from_value::<ThreadResumeParams>(json!({
+        "threadId": "thread-1",
+        "dynamicTools": [{
+            "type": "function",
+            "name": "resume_lookup",
+            "description": "Look up resumed thread state",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }]
+    }))
+    .expect("thread resume params should deserialize");
+
+    assert_eq!(params.dynamic_tools.as_ref().map(Vec::len), Some(1));
+    assert_eq!(
+        crate::experimental_api::ExperimentalApi::experimental_reason(&params),
+        Some("thread/resume.dynamicTools")
+    );
+}
+
+#[test]
 fn thread_resume_response_round_trips_initial_turns_page() {
     let response = ThreadResumeResponse {
         thread: Thread {
