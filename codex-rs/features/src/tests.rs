@@ -612,6 +612,7 @@ root_agent_usage_hint_text = "Root guidance."
 subagent_usage_hint_text = "Subagent guidance."
 tool_namespace = "agents"
 hide_spawn_agent_metadata = true
+expose_spawn_agent_model_overrides = true
 non_code_mode_only = true
 "#,
     )
@@ -635,6 +636,7 @@ non_code_mode_only = true
             subagent_usage_hint_text: Some("Subagent guidance.".to_string()),
             tool_namespace: Some("agents".to_string()),
             hide_spawn_agent_metadata: Some(true),
+            expose_spawn_agent_model_overrides: Some(true),
             non_code_mode_only: Some(true),
         }))
     );
