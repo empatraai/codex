@@ -27,6 +27,7 @@ use crate::codex_apps_cache::load_startup_cached_codex_apps_server_info;
 use crate::elicitation::ElicitationRequestManager;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
+use crate::reserved_env::validate_mcp_transport_environment;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::emit_duration;
 use crate::server::EffectiveMcpServer;
@@ -937,6 +938,8 @@ async fn make_rmcp_client(
     let config = match server.launch() {
         McpServerLaunch::Configured(config) => config.as_ref().clone(),
     };
+    validate_mcp_transport_environment(&config.transport)
+        .map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
     let resolved_environment = runtime_context
         .resolve_server_environment(server_name, &config)
         .map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
