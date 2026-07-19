@@ -1,0 +1,14 @@
+[package]
+name = "codex-swarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_swarm"
+doctest = false
+
+[dependencies]
+
+[lints]
+workspace = true

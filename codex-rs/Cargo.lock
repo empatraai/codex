@@ -3999,6 +3999,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-swarm"
+version = "0.0.0"
+
+[[package]]
 name = "codex-terminal-detection"
 version = "0.0.0"
 dependencies = [
