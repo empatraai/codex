@@ -35,7 +35,9 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SandboxEnforcement;
+use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -45,6 +47,7 @@ use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -390,31 +393,40 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
     );
 }
 
-#[tokio::test]
-async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    set_turn_config(&mut turn, config);
+#[test]
+fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
+    fn model_preset(model: &str, version: MultiAgentVersion) -> ModelPreset {
+        ModelPreset {
+            id: model.to_string(),
+            model: model.to_string(),
+            display_name: model.to_string(),
+            description: String::new(),
+            default_reasoning_effort: ReasoningEffort::Medium,
+            supported_reasoning_efforts: vec![ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: String::new(),
+            }],
+            supports_personality: false,
+            additional_speed_tiers: Vec::new(),
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+            is_default: false,
+            upgrade: None,
+            show_in_picker: true,
+            multi_agent_version: Some(version),
+            availability_nux: None,
+            supported_in_api: true,
+            input_modalities: Vec::new(),
+        }
+    }
 
-    let err = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "incompatible_model",
-                "model": "gpt-5.4",
-                "fork_turns": "none"
-            })),
-        ))
-        .await
-        .err()
-        .expect("model from a different multi-agent backend should be rejected");
+    let models = vec![
+        model_preset("gpt-5.4", MultiAgentVersion::V1),
+        model_preset("gpt-5.6-sol", MultiAgentVersion::V2),
+        model_preset("gpt-5.6-terra", MultiAgentVersion::V2),
+    ];
+    let err = find_spawn_agent_model_name(&models, "gpt-5.4", MultiAgentVersion::V2)
+        .expect_err("model from a different multi-agent backend should be rejected");
 
     assert_eq!(
         err,

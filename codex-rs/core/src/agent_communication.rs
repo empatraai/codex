@@ -47,6 +47,18 @@ pub(crate) fn emit_agent_communication_send(
     communication: &InterAgentCommunication,
     receiver_thread_id: ThreadId,
 ) {
+    let (content_len, encrypted) = if communication.content.is_empty() {
+        (
+            communication
+                .encrypted_content
+                .as_deref()
+                .map_or(0, str::len),
+            communication.encrypted_content.is_some(),
+        )
+    } else {
+        (communication.content.len(), false)
+    };
+
     tracing::info!(
         target: AGENT_COMMUNICATION_TARGET,
         {
@@ -56,11 +68,8 @@ pub(crate) fn emit_agent_communication_send(
             state = "send",
             sender_thread_id = %context.sender_thread_id,
             receiver_thread_id = %receiver_thread_id,
-            content = if communication.content.is_empty() {
-                communication.encrypted_content.as_deref().unwrap_or_default()
-            } else {
-                communication.content.as_str()
-            },
+            content_len,
+            encrypted,
         },
         "agent communication"
     );

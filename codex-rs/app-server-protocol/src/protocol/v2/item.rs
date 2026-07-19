@@ -14,6 +14,8 @@ use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmen
 use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianAssessmentDecisionSource;
 use codex_protocol::approvals::GuardianCommandSource as CoreGuardianCommandSource;
 use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
+use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
+use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
 use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
@@ -42,6 +44,10 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use ts_rs::TS;
+
+#[cfg(test)]
+#[path = "item_tests.rs"]
+mod tests;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -953,6 +959,31 @@ impl From<CoreTurnItem> for ThreadItem {
                     duration_ms,
                 }
             }
+            CoreTurnItem::CollabAgentToolCall(call) => ThreadItem::CollabAgentToolCall {
+                id: call.id,
+                tool: call.tool.into(),
+                status: call.status.into(),
+                sender_thread_id: call.sender_thread_id.to_string(),
+                receiver_thread_ids: call
+                    .receiver_thread_ids
+                    .into_iter()
+                    .map(|thread_id| thread_id.to_string())
+                    .collect(),
+                prompt: call.prompt,
+                model: call.model,
+                reasoning_effort: call.reasoning_effort,
+                agents_states: call
+                    .agents_states
+                    .into_iter()
+                    .map(|(thread_id, status)| (thread_id.to_string(), status.into()))
+                    .collect(),
+            },
+            CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
+                id: activity.id,
+                kind: activity.kind.into(),
+                agent_thread_id: activity.agent_thread_id.to_string(),
+                agent_path: activity.agent_path.to_string(),
+            },
             CoreTurnItem::ContextCompaction(compaction) => {
                 ThreadItem::ContextCompaction { id: compaction.id }
             }
@@ -1068,6 +1099,28 @@ impl From<CoreMcpToolCallStatus> for McpToolCallStatus {
             CoreMcpToolCallStatus::InProgress => McpToolCallStatus::InProgress,
             CoreMcpToolCallStatus::Completed => McpToolCallStatus::Completed,
             CoreMcpToolCallStatus::Failed => McpToolCallStatus::Failed,
+        }
+    }
+}
+
+impl From<CoreCollabAgentTool> for CollabAgentTool {
+    fn from(value: CoreCollabAgentTool) -> Self {
+        match value {
+            CoreCollabAgentTool::SpawnAgent => CollabAgentTool::SpawnAgent,
+            CoreCollabAgentTool::SendInput => CollabAgentTool::SendInput,
+            CoreCollabAgentTool::ResumeAgent => CollabAgentTool::ResumeAgent,
+            CoreCollabAgentTool::Wait => CollabAgentTool::Wait,
+            CoreCollabAgentTool::CloseAgent => CollabAgentTool::CloseAgent,
+        }
+    }
+}
+
+impl From<CoreCollabAgentToolCallStatus> for CollabAgentToolCallStatus {
+    fn from(value: CoreCollabAgentToolCallStatus) -> Self {
+        match value {
+            CoreCollabAgentToolCallStatus::InProgress => CollabAgentToolCallStatus::InProgress,
+            CoreCollabAgentToolCallStatus::Completed => CollabAgentToolCallStatus::Completed,
+            CoreCollabAgentToolCallStatus::Failed => CollabAgentToolCallStatus::Failed,
         }
     }
 }

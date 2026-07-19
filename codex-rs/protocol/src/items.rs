@@ -1,3 +1,5 @@
+use crate::AgentPath;
+use crate::ThreadId;
 use crate::mcp::CallToolResult;
 use crate::memory_citation::MemoryCitation;
 use crate::models::ContentItem;
@@ -5,9 +7,12 @@ use crate::models::ImageDetail;
 use crate::models::MessagePhase;
 use crate::models::ResponseItem;
 use crate::models::WebSearchAction;
+use crate::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use crate::protocol::AgentMessageEvent;
 use crate::protocol::AgentReasoningEvent;
 use crate::protocol::AgentReasoningRawContentEvent;
+use crate::protocol::AgentStatus;
+use crate::protocol::CollabAgentRef;
 use crate::protocol::ContextCompactedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::FileChange;
@@ -18,6 +23,7 @@ use crate::protocol::McpToolCallEndEvent;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
 use crate::protocol::PatchApplyStatus;
+use crate::protocol::SubAgentActivityKind;
 use crate::protocol::UserMessageEvent;
 use crate::protocol::ViewImageToolCallEvent;
 use crate::protocol::WebSearchEndEvent;
@@ -52,6 +58,8 @@ pub enum TurnItem {
     ImageGeneration(ImageGenerationItem),
     FileChange(FileChangeItem),
     McpToolCall(McpToolCallItem),
+    CollabAgentToolCall(CollabAgentToolCallItem),
+    SubAgentActivity(SubAgentActivityItem),
     ContextCompaction(ContextCompactionItem),
 }
 
@@ -238,6 +246,61 @@ pub enum McpToolCallStatus {
 #[ts(rename_all = "camelCase")]
 pub struct McpToolCallError {
     pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum CollabAgentTool {
+    SpawnAgent,
+    SendInput,
+    ResumeAgent,
+    Wait,
+    CloseAgent,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum CollabAgentToolCallStatus {
+    InProgress,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct CollabAgentToolCallItem {
+    pub id: String,
+    pub tool: CollabAgentTool,
+    pub status: CollabAgentToolCallStatus,
+    pub sender_thread_id: ThreadId,
+    #[serde(default)]
+    pub receiver_thread_ids: Vec<ThreadId>,
+    #[serde(default)]
+    pub receiver_agents: Vec<CollabAgentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    #[serde(default)]
+    pub agents_states: HashMap<ThreadId, AgentStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct SubAgentActivityItem {
+    pub id: String,
+    pub kind: SubAgentActivityKind,
+    pub agent_thread_id: ThreadId,
+    pub agent_path: AgentPath,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -617,6 +680,8 @@ impl TurnItem {
             TurnItem::ImageGeneration(item) => item.id.clone(),
             TurnItem::FileChange(item) => item.id.clone(),
             TurnItem::McpToolCall(item) => item.id.clone(),
+            TurnItem::CollabAgentToolCall(item) => item.id.clone(),
+            TurnItem::SubAgentActivity(item) => item.id.clone(),
             TurnItem::ContextCompaction(item) => item.id.clone(),
         }
     }
@@ -641,6 +706,8 @@ impl TurnItem {
                 .into_iter()
                 .collect(),
             TurnItem::McpToolCall(item) => item.as_legacy_end_event().into_iter().collect(),
+            TurnItem::CollabAgentToolCall(_) => Vec::new(),
+            TurnItem::SubAgentActivity(_) => Vec::new(),
             TurnItem::Reasoning(item) => item.as_legacy_events(show_raw_agent_reasoning),
             TurnItem::ContextCompaction(item) => vec![item.as_legacy_event()],
         }

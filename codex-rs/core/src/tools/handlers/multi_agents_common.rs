@@ -394,7 +394,7 @@ pub(crate) async fn apply_spawn_agent_role(
     )
 }
 
-fn find_spawn_agent_model_name(
+pub(crate) fn find_spawn_agent_model_name(
     available_models: &[ModelPreset],
     requested_model: &str,
     multi_agent_version: MultiAgentVersion,
