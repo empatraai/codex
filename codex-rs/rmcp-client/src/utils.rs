@@ -9,10 +9,35 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 
+const EMPATRA_MODEL_GATEWAY_CAPABILITY_ENV_VAR: &str = "EMPATRA_MODEL_GATEWAY_TOKEN";
+
+/// Returns whether an environment variable is reserved for a host-only Empatra capability.
+pub fn is_reserved_mcp_env_var(name: &str) -> bool {
+    name.eq_ignore_ascii_case(EMPATRA_MODEL_GATEWAY_CAPABILITY_ENV_VAR)
+}
+
 pub(crate) fn create_env_for_mcp_server(
     extra_env: Option<HashMap<OsString, OsString>>,
     env_vars: &[McpServerEnvVar],
 ) -> Result<HashMap<OsString, OsString>> {
+    if let Some(name) = extra_env.as_ref().and_then(|env| {
+        env.keys()
+            .find(|name| is_reserved_mcp_env_var(&name.to_string_lossy()))
+    }) {
+        return Err(anyhow!(
+            "MCP server environment cannot set reserved host variable `{}`",
+            name.to_string_lossy()
+        ));
+    }
+    if let Some(var) = env_vars
+        .iter()
+        .find(|var| is_reserved_mcp_env_var(var.name()))
+    {
+        return Err(anyhow!(
+            "MCP server environment cannot inherit reserved host variable `{}`",
+            var.name()
+        ));
+    }
     let additional_env_vars = local_stdio_env_var_names(env_vars)?;
     let env = DEFAULT_ENV_VARS
         .iter()
@@ -34,8 +59,14 @@ pub(crate) fn create_env_overlay_for_remote_mcp_server(
     env_vars
         .iter()
         .filter(|var| !var.is_remote_source())
+        .filter(|var| !is_reserved_mcp_env_var(var.name()))
         .filter_map(|var| env::var_os(var.name()).map(|value| (OsString::from(var.name()), value)))
-        .chain(extra_env.unwrap_or_default())
+        .chain(
+            extra_env
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(name, _)| !is_reserved_mcp_env_var(&name.to_string_lossy())),
+        )
         .collect()
 }
 
@@ -43,6 +74,7 @@ pub(crate) fn remote_mcp_env_var_names(env_vars: &[McpServerEnvVar]) -> Vec<Stri
     env_vars
         .iter()
         .filter(|var| var.is_remote_source())
+        .filter(|var| !is_reserved_mcp_env_var(var.name()))
         .map(|var| var.name().to_string())
         .collect()
 }
@@ -85,6 +117,11 @@ pub(crate) fn build_default_headers(
 
     if let Some(env_headers) = env_http_headers {
         for (name, env_var) in env_headers {
+            if is_reserved_mcp_env_var(&env_var) {
+                return Err(anyhow!(
+                    "MCP HTTP header cannot reference reserved host variable `{env_var}`"
+                ));
+            }
             if let Ok(value) = env::var(&env_var) {
                 if value.trim().is_empty() {
                     continue;
@@ -207,6 +244,30 @@ mod tests {
         let env = create_env_for_mcp_server(/*extra_env*/ None, &[custom_var.into()])
             .expect("local MCP env should build");
         assert_eq!(env.get(OsStr::new(custom_var)), Some(&expected));
+    }
+
+    #[test]
+    fn mcp_environment_rejects_reserved_host_capability_names() {
+        let reserved = EMPATRA_MODEL_GATEWAY_CAPABILITY_ENV_VAR.to_ascii_lowercase();
+        let local_error =
+            create_env_for_mcp_server(/*extra_env*/ None, &[reserved.clone().into()])
+                .expect_err("reserved local MCP env should be rejected");
+        let header_error = build_default_headers(
+            /*http_headers*/ None,
+            Some(HashMap::from([("Authorization".to_string(), reserved)])),
+        )
+        .expect_err("reserved MCP header env should be rejected");
+
+        assert_eq!(
+            (
+                local_error.to_string(),
+                header_error.to_string(),
+            ),
+            (
+                "MCP server environment cannot inherit reserved host variable `empatra_model_gateway_token`".to_string(),
+                "MCP HTTP header cannot reference reserved host variable `empatra_model_gateway_token`".to_string(),
+            )
+        );
     }
 
     #[test]

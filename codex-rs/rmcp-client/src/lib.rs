@@ -43,3 +43,4 @@ pub use rmcp_client::ToolWithConnectorId;
 pub use stdio_server_launcher::ExecutorStdioServerLauncher;
 pub use stdio_server_launcher::LocalStdioServerLauncher;
 pub use stdio_server_launcher::StdioServerLauncher;
+pub use utils::is_reserved_mcp_env_var;

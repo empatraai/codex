@@ -82,6 +82,7 @@ pub(crate) mod connection_manager;
 pub(crate) mod elicitation;
 pub(crate) mod mcp;
 mod plugin_config;
+mod reserved_env;
 mod resource_client;
 pub(crate) mod rmcp_client;
 pub(crate) mod runtime;
