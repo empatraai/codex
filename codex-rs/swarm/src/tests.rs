@@ -96,3 +96,151 @@ fn registries_cover_every_pattern_and_domain_policy() {
         EvidencePolicy::BuildAndTest
     );
 }
+
+#[test]
+fn task_lifecycle_enforces_scheduler_order_and_idempotent_replay() {
+    let mut lifecycle = TaskLifecycle::new();
+    assert_eq!(
+        lifecycle.transition_to(TaskState::Proposed),
+        Ok(TransitionOutcome::Unchanged(TaskState::Proposed))
+    );
+    assert_eq!(
+        lifecycle.transition_to(TaskState::Scheduled),
+        Ok(TransitionOutcome::Changed {
+            from: TaskState::Proposed,
+            to: TaskState::Scheduled,
+        })
+    );
+    lifecycle.transition_to(TaskState::Ready).unwrap();
+    lifecycle.transition_to(TaskState::Running).unwrap();
+    lifecycle.transition_to(TaskState::Waiting).unwrap();
+    lifecycle.transition_to(TaskState::Ready).unwrap();
+    lifecycle.transition_to(TaskState::Running).unwrap();
+    lifecycle.transition_to(TaskState::Completed).unwrap();
+
+    assert_eq!(lifecycle.state(), TaskState::Completed);
+    assert!(lifecycle.state().is_terminal());
+    assert_eq!(
+        lifecycle.transition_to(TaskState::Completed),
+        Ok(TransitionOutcome::Unchanged(TaskState::Completed))
+    );
+}
+
+#[test]
+fn task_lifecycle_rejects_skips_and_terminal_reopen() {
+    let mut lifecycle = TaskLifecycle::new();
+    assert_eq!(
+        lifecycle.transition_to(TaskState::Running),
+        Err(InvalidTaskTransition {
+            from: TaskState::Proposed,
+            to: TaskState::Running,
+        })
+    );
+
+    lifecycle.transition_to(TaskState::Scheduled).unwrap();
+    lifecycle.transition_to(TaskState::Ready).unwrap();
+    lifecycle.transition_to(TaskState::Cancelled).unwrap();
+    assert_eq!(
+        lifecycle.transition_to(TaskState::Scheduled),
+        Err(InvalidTaskTransition {
+            from: TaskState::Cancelled,
+            to: TaskState::Scheduled,
+        })
+    );
+}
+
+#[test]
+fn retry_and_recovery_return_work_to_the_scheduler() {
+    let mut retryable = TaskLifecycle::restore(TaskState::Running);
+    retryable.transition_to(TaskState::Scheduled).unwrap();
+    assert_eq!(retryable.state(), TaskState::Scheduled);
+
+    let mut lost = TaskLifecycle::restore(TaskState::Lost);
+    lost.transition_to(TaskState::Scheduled).unwrap();
+    assert_eq!(lost.state(), TaskState::Scheduled);
+}
+
+#[test]
+fn wait_graph_rejects_scheduler_cycles_with_the_cycle_path() {
+    let task_a = WaitNode::scheduler(WaitNodeKind::Task, "a");
+    let task_b = WaitNode::scheduler(WaitNodeKind::Task, "b");
+    let join = WaitNode::scheduler(WaitNodeKind::Join, "join");
+    let mut graph = WaitGraph::default();
+
+    graph.add_wait(task_a.clone(), task_b.clone()).unwrap();
+    graph.add_wait(task_b.clone(), join.clone()).unwrap();
+    assert_eq!(
+        graph.add_wait(join.clone(), task_a.clone()),
+        Err(WaitGraphError::CycleDetected {
+            path: vec![
+                join,
+                task_a,
+                task_b,
+                WaitNode::scheduler(WaitNodeKind::Join, "join")
+            ],
+        })
+    );
+}
+
+#[test]
+fn external_waits_do_not_create_false_scheduler_deadlocks() {
+    let task = WaitNode::scheduler(WaitNodeKind::Task, "task");
+    let human = WaitNode::external(WaitNodeKind::Human, "user-approval");
+    let mut graph = WaitGraph::default();
+
+    assert_eq!(
+        graph.add_wait(task.clone(), human.clone()),
+        Ok(WaitEdgeOutcome::Added)
+    );
+    assert_eq!(graph.add_wait(human, task), Ok(WaitEdgeOutcome::Added));
+}
+
+#[test]
+fn wait_edges_are_idempotent_and_cleanup_removes_both_directions() {
+    let task = WaitNode::scheduler(WaitNodeKind::Task, "task");
+    let message = WaitNode::scheduler(WaitNodeKind::Message, "message");
+    let join = WaitNode::scheduler(WaitNodeKind::Join, "join");
+    let mut graph = WaitGraph::default();
+
+    assert_eq!(
+        graph.add_wait(task.clone(), message.clone()),
+        Ok(WaitEdgeOutcome::Added)
+    );
+    assert_eq!(
+        graph.add_wait(task.clone(), message.clone()),
+        Ok(WaitEdgeOutcome::Unchanged)
+    );
+    graph.add_wait(message.clone(), join).unwrap();
+
+    assert_eq!(graph.remove_node(&message), 2);
+    assert_eq!(graph.dependencies(&task).count(), 0);
+}
+
+#[test]
+fn wait_graph_rejects_empty_durable_identity() {
+    let mut graph = WaitGraph::default();
+    assert_eq!(
+        graph.add_wait(
+            WaitNode::scheduler(WaitNodeKind::Task, " "),
+            WaitNode::scheduler(WaitNodeKind::Resource, "provider"),
+        ),
+        Err(WaitGraphError::EmptyNodeId {
+            kind: WaitNodeKind::Task,
+        })
+    );
+}
+
+#[test]
+fn human_and_external_waits_cannot_be_misclassified_as_scheduler_owned() {
+    let mut graph = WaitGraph::default();
+    assert_eq!(
+        graph.add_wait(
+            WaitNode::scheduler(WaitNodeKind::Task, "task"),
+            WaitNode::scheduler(WaitNodeKind::Human, "user"),
+        ),
+        Err(WaitGraphError::InvalidOwnership {
+            kind: WaitNodeKind::Human,
+            ownership: WaitOwnership::Scheduler,
+        })
+    );
+}
