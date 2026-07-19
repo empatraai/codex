@@ -1205,9 +1205,11 @@ async fn project_layers_do_not_override_project_root_markers() {
 
     let mut config = make_config(&root, /*limit*/ 4096, /*instructions*/ None).await;
     config.cwd = nested.abs();
-    let project_layer = |dot_codex_folder: AbsolutePathBuf, marker: &str| {
+    let project_layer = |project_config_folder: AbsolutePathBuf, marker: &str| {
         ConfigLayerEntry::new(
-            ConfigLayerSource::Project { dot_codex_folder },
+            ConfigLayerSource::Project {
+                project_config_folder,
+            },
             TomlValue::Table(
                 [(
                     "project_root_markers".to_string(),
@@ -1220,8 +1222,8 @@ async fn project_layers_do_not_override_project_root_markers() {
     };
     config.config_layer_stack = ConfigLayerStack::new(
         vec![
-            project_layer(root.path().join(".codex").abs(), ".ignored-root-marker"),
-            project_layer(config.cwd.join(".codex"), ".ignored-nested-marker"),
+            project_layer(root.path().join(".empatra").abs(), ".ignored-root-marker"),
+            project_layer(config.cwd.join(".empatra"), ".ignored-nested-marker"),
         ],
         ConfigRequirements::default(),
         ConfigRequirementsToml::default(),

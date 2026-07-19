@@ -671,7 +671,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
     config.config_layer_stack = ConfigLayerStack::new(
         vec![ConfigLayerEntry::new(
             ConfigLayerSource::Project {
-                dot_codex_folder: project_dir.path().abs(),
+                project_config_folder: project_dir.path().abs(),
             },
             toml::Value::Table(Default::default()),
         )],

@@ -34,6 +34,7 @@ use crate::thread_config::ThreadConfigContext;
 use crate::thread_config::ThreadConfigLoader;
 use codex_file_system::ExecutorFileSystem;
 use codex_git_utils::resolve_root_git_project_for_trust;
+use codex_protocol::PROJECT_CONFIG_DIR_NAME;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::TrustLevel;
@@ -100,8 +101,8 @@ async fn first_layer_config_error_from_entries(layers: &[ConfigLayerEntry]) -> O
 /// - user      `${CODEX_HOME}/config.toml`
 /// - profile   `${CODEX_HOME}/<name>.config.toml`, when selected
 /// - cwd       `${PWD}/config.toml` (loaded but disabled when the directory is untrusted)
-/// - tree      parent directories up to root looking for `./.codex/config.toml` (loaded but disabled when untrusted)
-/// - repo      `$(git rev-parse --show-toplevel)/.codex/config.toml` (loaded but disabled when untrusted)
+/// - tree      parent directories up to root looking for `./.empatra/config.toml` (loaded but disabled when untrusted)
+/// - repo      `$(git rev-parse --show-toplevel)/.empatra/config.toml` (loaded but disabled when untrusted)
 /// - runtime   e.g., --config flags, model selector in UI
 ///
 /// (*) Only available on macOS via managed device profiles.
@@ -912,18 +913,18 @@ impl ProjectTrustContext {
         }
 
         let relative_dir = dir.as_path().strip_prefix(checkout_root.as_path()).ok()?;
-        Some(repo_root.join(relative_dir).join(".codex"))
+        Some(repo_root.join(relative_dir).join(PROJECT_CONFIG_DIR_NAME))
     }
 }
 
 fn project_layer_entry(
-    dot_codex_folder: &AbsolutePathBuf,
+    project_config_folder: &AbsolutePathBuf,
     config: TomlValue,
     disabled_reason: Option<String>,
     hooks_config_folder_override: Option<AbsolutePathBuf>,
 ) -> ConfigLayerEntry {
     let source = ConfigLayerSource::Project {
-        dot_codex_folder: dot_codex_folder.clone(),
+        project_config_folder: project_config_folder.clone(),
     };
 
     let entry = if let Some(reason) = disabled_reason {
@@ -955,10 +956,10 @@ fn sanitize_project_config(config: &mut TomlValue) -> Vec<String> {
 }
 
 fn project_ignored_config_keys_warning(
-    dot_codex_folder: &AbsolutePathBuf,
+    project_config_folder: &AbsolutePathBuf,
     ignored_keys: &[String],
 ) -> String {
-    let config_path = dot_codex_folder.join(CONFIG_TOML_FILE);
+    let config_path = project_config_folder.join(CONFIG_TOML_FILE);
     let ignored_keys = ignored_keys.join(", ");
     format!(
         concat!(
@@ -1221,10 +1222,10 @@ async fn load_project_layers(
     let mut layers = Vec::new();
     let mut startup_warnings = Vec::new();
     for dir in dirs {
-        let dot_codex_abs = dir.join(".codex");
-        let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
+        let project_config_abs = dir.join(PROJECT_CONFIG_DIR_NAME);
+        let project_config_uri = PathUri::from_abs_path(&project_config_abs);
         if !fs
-            .get_metadata(&dot_codex_uri, /*sandbox*/ None)
+            .get_metadata(&project_config_uri, /*sandbox*/ None)
             .await
             .map(|metadata| metadata.is_directory)
             .unwrap_or(false)
@@ -1235,12 +1236,14 @@ async fn load_project_layers(
         let decision = trust_context.decision_for_dir(&dir);
         let disabled_reason = trust_context.disabled_reason_for_decision(&decision);
         let hooks_config_folder_override = trust_context.root_checkout_hooks_folder_for_dir(&dir);
-        let dot_codex_normalized =
-            normalize_path(dot_codex_abs.as_path()).unwrap_or_else(|_| dot_codex_abs.to_path_buf());
-        if dot_codex_abs == codex_home_abs || dot_codex_normalized == codex_home_normalized {
+        let project_config_normalized = normalize_path(project_config_abs.as_path())
+            .unwrap_or_else(|_| project_config_abs.to_path_buf());
+        if project_config_abs == codex_home_abs
+            || project_config_normalized == codex_home_normalized
+        {
             continue;
         }
-        let config_file = dot_codex_abs.join(CONFIG_TOML_FILE);
+        let config_file = project_config_abs.join(CONFIG_TOML_FILE);
         let config_file_uri = PathUri::from_abs_path(&config_file);
         match fs.read_file_text(&config_file_uri, /*sandbox*/ None).await {
             Ok(contents) => {
@@ -1257,7 +1260,7 @@ async fn load_project_layers(
                             ));
                         }
                         layers.push(project_layer_entry(
-                            &dot_codex_abs,
+                            &project_config_abs,
                             TomlValue::Table(toml::map::Map::new()),
                             disabled_reason.clone(),
                             hooks_config_folder_override.clone(),
@@ -1271,12 +1274,12 @@ async fn load_project_layers(
                         config_file.as_path(),
                         &contents,
                         &config,
-                        dot_codex_abs.as_path(),
+                        project_config_abs.as_path(),
                     )?;
                 }
                 let ignored_project_config_keys = sanitize_project_config(&mut config);
                 let config =
-                    resolve_relative_paths_in_config_toml(config, dot_codex_abs.as_path())?;
+                    resolve_relative_paths_in_config_toml(config, project_config_abs.as_path())?;
                 let config = merge_root_checkout_project_hooks(
                     fs,
                     config,
@@ -1286,12 +1289,12 @@ async fn load_project_layers(
                 .await?;
                 if disabled_reason.is_none() && !ignored_project_config_keys.is_empty() {
                     startup_warnings.push(project_ignored_config_keys_warning(
-                        &dot_codex_abs,
+                        &project_config_abs,
                         &ignored_project_config_keys,
                     ));
                 }
                 let entry = project_layer_entry(
-                    &dot_codex_abs,
+                    &project_config_abs,
                     config,
                     disabled_reason.clone(),
                     hooks_config_folder_override.clone(),
@@ -1311,7 +1314,7 @@ async fn load_project_layers(
                     )
                     .await?;
                     layers.push(project_layer_entry(
-                        &dot_codex_abs,
+                        &project_config_abs,
                         config,
                         disabled_reason,
                         hooks_config_folder_override,

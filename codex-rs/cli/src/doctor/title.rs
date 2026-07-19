@@ -177,7 +177,9 @@ fn terminal_title_project_root(config: &Config, cwd: &Path) -> Option<ProjectTit
         )
         .iter()
         .find_map(|layer| match &layer.name {
-            ConfigLayerSource::Project { dot_codex_folder } => dot_codex_folder
+            ConfigLayerSource::Project {
+                project_config_folder,
+            } => project_config_folder
                 .as_path()
                 .parent()
                 .map(|root| ProjectTitleRoot {

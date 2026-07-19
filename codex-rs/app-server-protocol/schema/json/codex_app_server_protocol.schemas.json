@@ -8193,9 +8193,9 @@
             "type": "object"
           },
           {
-            "description": "Path to a .codex/ folder within a project. There could be multiple of these between `cwd` and the project/repo root.",
+            "description": "Path to a `.empatra` folder within a project. There could be multiple of these between `cwd` and the project/repo root.",
             "properties": {
-              "dotCodexFolder": {
+              "projectConfigFolder": {
                 "$ref": "#/definitions/v2/AbsolutePathBuf"
               },
               "type": {
@@ -8207,7 +8207,7 @@
               }
             },
             "required": [
-              "dotCodexFolder",
+              "projectConfigFolder",
               "type"
             ],
             "title": "ProjectConfigLayerSource",

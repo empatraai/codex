@@ -988,7 +988,7 @@ fn expected_absolute_path(path: &PathBuf) -> String {
 #[test]
 fn normalize_path_for_skill_id_repo_scoped_uses_relative_path() {
     let repo_root = PathBuf::from("/repo/root");
-    let skill_path = PathBuf::from("/repo/root/.codex/skills/doc/SKILL.md");
+    let skill_path = PathBuf::from("/repo/root/.empatra/skills/doc/SKILL.md");
 
     let path = normalize_path_for_skill_id(
         Some("https://example.com/repo.git"),

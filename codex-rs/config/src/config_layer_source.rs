@@ -15,8 +15,10 @@ pub enum ConfigLayerSource {
         file: AbsolutePathBuf,
         profile: Option<String>,
     },
-    /// Configuration loaded from a project's `.codex` directory.
-    Project { dot_codex_folder: AbsolutePathBuf },
+    /// Configuration loaded from a project's `.empatra` directory.
+    Project {
+        project_config_folder: AbsolutePathBuf,
+    },
     /// Overrides supplied for the current session.
     SessionFlags,
     /// Legacy managed configuration loaded from a file.
@@ -86,10 +88,12 @@ pub fn format_config_layer_source(source: &ConfigLayerSource, config_toml_file: 
         ConfigLayerSource::User { file, .. } => {
             format!("user ({})", file.as_path().display())
         }
-        ConfigLayerSource::Project { dot_codex_folder } => {
+        ConfigLayerSource::Project {
+            project_config_folder,
+        } => {
             format!(
                 "project ({}/{config_toml_file})",
-                dot_codex_folder.as_path().display()
+                project_config_folder.as_path().display()
             )
         }
         ConfigLayerSource::SessionFlags => "session-flags".to_string(),

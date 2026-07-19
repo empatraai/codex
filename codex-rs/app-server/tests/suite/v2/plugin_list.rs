@@ -1092,9 +1092,9 @@ enabled = true
   ]
 }"#,
     )?;
-    std::fs::create_dir_all(workspace_enabled.path().join(".codex"))?;
+    std::fs::create_dir_all(workspace_enabled.path().join(".empatra"))?;
     std::fs::write(
-        workspace_enabled.path().join(".codex/config.toml"),
+        workspace_enabled.path().join(".empatra/config.toml"),
         r#"[plugins."shared-plugin@codex-curated"]
 enabled = false
 "#,

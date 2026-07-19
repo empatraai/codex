@@ -31,3 +31,10 @@ pub mod request_permissions;
 pub mod request_user_input;
 pub mod shell_environment;
 pub mod user_input;
+
+/// Directory used for project-local Empatra configuration and metadata.
+///
+/// This is deliberately separate from `CODEX_HOME`, which remains the global
+/// runtime data directory, and from `.codex-plugin`, which is the plugin
+/// manifest contract.
+pub const PROJECT_CONFIG_DIR_NAME: &str = ".empatra";

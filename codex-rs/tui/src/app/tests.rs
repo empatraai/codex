@@ -6162,7 +6162,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
 async fn clear_only_ui_reset_allows_active_skill_warning_to_render_again() {
     let mut app = make_test_app().await;
     let error = SkillErrorInfo {
-        path: test_path_buf("/tmp/project/.codex/skills/abc/SKILL.md"),
+        path: test_path_buf("/tmp/project/.empatra/skills/abc/SKILL.md"),
         message: "invalid description".to_string(),
     };
 

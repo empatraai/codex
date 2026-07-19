@@ -97,9 +97,9 @@ fn collect_layer_mtimes(stack: &ConfigLayerStack) -> Vec<LayerMtime> {
             let path = match &layer.name {
                 ConfigLayerSource::System { file } => Some(file.clone()),
                 ConfigLayerSource::User { file, .. } => Some(file.clone()),
-                ConfigLayerSource::Project { dot_codex_folder } => {
-                    Some(dot_codex_folder.join(CONFIG_TOML_FILE))
-                }
+                ConfigLayerSource::Project {
+                    project_config_folder,
+                } => Some(project_config_folder.join(CONFIG_TOML_FILE)),
                 ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => Some(file.clone()),
                 _ => None,
             };

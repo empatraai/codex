@@ -19,9 +19,11 @@ pub(crate) fn config_layer_source_to_api(source: ConfigLayerSource) -> ApiConfig
             ApiConfigLayerSource::EnterpriseManaged { id, name }
         }
         ConfigLayerSource::User { file, profile } => ApiConfigLayerSource::User { file, profile },
-        ConfigLayerSource::Project { dot_codex_folder } => {
-            ApiConfigLayerSource::Project { dot_codex_folder }
-        }
+        ConfigLayerSource::Project {
+            project_config_folder,
+        } => ApiConfigLayerSource::Project {
+            project_config_folder,
+        },
         ConfigLayerSource::SessionFlags => ApiConfigLayerSource::SessionFlags,
         ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => {
             ApiConfigLayerSource::LegacyManagedConfigTomlFromFile { file }

@@ -70,10 +70,22 @@ impl ExecutorFileSystem for TestFileSystem {
 
     fn get_metadata<'a>(
         &'a self,
-        _path: &'a PathUri,
+        path: &'a PathUri,
         _sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
-        Box::pin(async move { unimplemented!("test filesystem only supports reads") })
+        Box::pin(async move {
+            let path = path.to_abs_path()?;
+            let metadata = tokio::fs::symlink_metadata(path.as_path()).await?;
+            let file_type = metadata.file_type();
+            Ok(FileMetadata {
+                is_directory: file_type.is_dir(),
+                is_file: file_type.is_file(),
+                is_symlink: file_type.is_symlink(),
+                size: metadata.len(),
+                created_at_ms: 0,
+                modified_at_ms: 0,
+            })
+        })
     }
 
     fn read_directory<'a>(
@@ -102,6 +114,69 @@ impl ExecutorFileSystem for TestFileSystem {
     ) -> ExecutorFileSystemFuture<'a, ()> {
         Box::pin(async move { unimplemented!("test filesystem only supports reads") })
     }
+}
+
+#[tokio::test]
+async fn project_layers_use_empatra_directory_and_ignore_legacy_codex_directory() {
+    let tmp = tempdir().expect("tempdir");
+    let codex_home = tmp.path().join("home");
+    let project = tmp.path().join("project");
+    let project_config = project.join(PROJECT_CONFIG_DIR_NAME);
+    let legacy_project_config = project.join(".codex");
+
+    tokio::fs::create_dir_all(&codex_home)
+        .await
+        .expect("create codex home");
+    tokio::fs::create_dir_all(&project_config)
+        .await
+        .expect("create project config");
+    tokio::fs::create_dir_all(&legacy_project_config)
+        .await
+        .expect("create legacy project config");
+    tokio::fs::write(
+        project_config.join(CONFIG_TOML_FILE),
+        r#"model = "empatra-project""#,
+    )
+    .await
+    .expect("write project config");
+    tokio::fs::write(
+        legacy_project_config.join(CONFIG_TOML_FILE),
+        r#"model = "legacy-codex-project""#,
+    )
+    .await
+    .expect("write legacy project config");
+
+    let layers = load_config_layers_state(
+        &TestFileSystem,
+        &codex_home,
+        Some(AbsolutePathBuf::from_absolute_path(&project).expect("absolute project")),
+        &[],
+        LoaderOverrides::without_managed_config_for_tests(),
+        &crate::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load config layers");
+
+    let project_layers = layers
+        .get_layers(
+            crate::ConfigLayerStackOrdering::HighestPrecedenceFirst,
+            /*include_disabled*/ true,
+        )
+        .into_iter()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(project_layers.len(), 1);
+    assert_eq!(
+        project_layers[0].name,
+        ConfigLayerSource::Project {
+            project_config_folder: AbsolutePathBuf::from_absolute_path(project_config)
+                .expect("absolute project config"),
+        }
+    );
+    assert_eq!(
+        project_layers[0].config.get("model"),
+        Some(&TomlValue::String("empatra-project".to_string()))
+    );
 }
 
 #[tokio::test]

@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use toml::Value as TomlValue;
 
-const REPO_ROOT_CONFIG_DIR_NAME: &str = ".codex";
+const REPO_ROOT_CONFIG_DIR_NAME: &str = ".empatra";
 
 struct TestConfig {
     cwd: AbsolutePathBuf,
@@ -70,7 +70,7 @@ fn project_layers_for_cwd(cwd: &Path) -> Vec<ConfigLayerEntry> {
             dot_codex.is_dir().then(|| {
                 ConfigLayerEntry::new(
                     ConfigLayerSource::Project {
-                        dot_codex_folder: dot_codex.abs(),
+                        project_config_folder: dot_codex.abs(),
                     },
                     TomlValue::Table(toml::map::Map::new()),
                 )
@@ -219,7 +219,7 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
     fs::create_dir_all(&user_folder)?;
 
     let project_root = tmp.path().join("repo");
-    let dot_codex = project_root.join(".codex");
+    let dot_codex = project_root.join(".empatra");
     fs::create_dir_all(&dot_codex)?;
 
     let user_file = user_folder.join("config.toml").abs();
@@ -235,7 +235,7 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
         ),
         ConfigLayerEntry::new_disabled(
             ConfigLayerSource::Project {
-                dot_codex_folder: project_dot_codex,
+                project_config_folder: project_dot_codex,
             },
             TomlValue::Table(toml::map::Map::new()),
             "marked untrusted",

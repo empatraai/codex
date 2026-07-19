@@ -203,21 +203,23 @@ impl ConfigLayerEntry {
         }
     }
 
-    // Get the `.codex/` folder associated with this config layer, if any.
+    // Get the project metadata folder associated with this config layer, if any.
     pub fn config_folder(&self) -> Option<AbsolutePathBuf> {
         match &self.name {
             ConfigLayerSource::Mdm { .. } => None,
             ConfigLayerSource::System { file } => file.parent(),
             ConfigLayerSource::EnterpriseManaged { .. } => None,
             ConfigLayerSource::User { file, .. } => file.parent(),
-            ConfigLayerSource::Project { dot_codex_folder } => Some(dot_codex_folder.clone()),
+            ConfigLayerSource::Project {
+                project_config_folder,
+            } => Some(project_config_folder.clone()),
             ConfigLayerSource::SessionFlags => None,
             ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. } => None,
             ConfigLayerSource::LegacyManagedConfigTomlFromMdm => None,
         }
     }
 
-    /// Returns the `.codex/` folder that should be used for hook declarations.
+    /// Returns the project metadata folder that should be used for hook declarations.
     ///
     /// Project layers normally use their own config folder. Linked Git worktrees
     /// can instead point hook discovery at the matching folder from the root
@@ -554,25 +556,25 @@ fn verify_layer_ordering(layers: &[ConfigLayerEntry]) -> std::io::Result<Option<
     // user layers are allowed so a profile override can layer on top of the base
     // user config.
     let mut user_layer_index: Option<usize> = None;
-    let mut previous_project_dot_codex_folder: Option<&AbsolutePathBuf> = None;
+    let mut previous_project_config_folder: Option<&AbsolutePathBuf> = None;
     for (index, layer) in layers.iter().enumerate() {
         if matches!(layer.name, ConfigLayerSource::User { .. }) {
             user_layer_index = Some(index);
         }
 
         if let ConfigLayerSource::Project {
-            dot_codex_folder: current_project_dot_codex_folder,
+            project_config_folder: current_project_config_folder,
         } = &layer.name
         {
-            if let Some(previous) = previous_project_dot_codex_folder {
+            if let Some(previous) = previous_project_config_folder {
                 let Some(parent) = previous.as_path().parent() else {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "project layer has no parent directory",
                     ));
                 };
-                if previous == current_project_dot_codex_folder
-                    || !current_project_dot_codex_folder
+                if previous == current_project_config_folder
+                    || !current_project_config_folder
                         .as_path()
                         .ancestors()
                         .any(|ancestor| ancestor == parent)
@@ -583,7 +585,7 @@ fn verify_layer_ordering(layers: &[ConfigLayerEntry]) -> std::io::Result<Option<
                     ));
                 }
             }
-            previous_project_dot_codex_folder = Some(current_project_dot_codex_folder);
+            previous_project_config_folder = Some(current_project_config_folder);
         }
     }
 

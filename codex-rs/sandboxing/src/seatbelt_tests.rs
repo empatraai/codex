@@ -253,7 +253,7 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
         writable_definitions,
         vec![
             "-DWRITABLE_ROOT_0=/".to_string(),
-            "-DWRITABLE_ROOT_0_EXCLUDED_0=/.codex".to_string(),
+            "-DWRITABLE_ROOT_0_EXCLUDED_0=/.empatra".to_string(),
             format!("-DWRITABLE_ROOT_0_EXCLUDED_1={}", unreadable_root.display()),
         ],
         "unexpected write carveout parameters in args: {args:#?}"
@@ -868,7 +868,7 @@ fn create_seatbelt_args_full_network_with_proxy_is_still_proxy_only() {
 }
 
 #[test]
-fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
+fn create_seatbelt_args_with_read_only_git_and_project_config_subpaths() {
     // Create a temporary workspace with two writable roots: one containing
     // top-level workspace metadata paths and one without them.
     let tmp = TempDir::new().expect("tempdir");
@@ -877,7 +877,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         vulnerable_root_canonical,
         dot_git_canonical,
         dot_agents_canonical: _,
-        dot_codex_canonical,
+        project_config_canonical,
         empty_root,
         empty_root_canonical,
     } = populate_tmpdir(tmp.path());
@@ -897,13 +897,13 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
     };
 
     // Create the Seatbelt command to wrap a shell command that tries to
-    // write to .codex/config.toml in the vulnerable root.
+    // write to .empatra/config.toml in the vulnerable root.
     let shell_command: Vec<String> = [
         "bash",
         "-c",
         "echo 'sandbox_mode = \"danger-full-access\"' > \"$1\"",
         "bash",
-        dot_codex_canonical
+        project_config_canonical
             .join("config.toml")
             .to_string_lossy()
             .as_ref(),
@@ -937,7 +937,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
     assert!(
         policy_text.contains("WRITABLE_ROOT_1_EXCLUDED_0")
             && policy_text.contains("WRITABLE_ROOT_1_EXCLUDED_1"),
-        "expected explicit writable root .git/.codex carveouts in policy:\n{policy_text}",
+        "expected explicit writable root .git/.empatra carveouts in policy:\n{policy_text}",
     );
     assert!(
         policy_text.contains(&seatbelt_protected_metadata_name_requirements(
@@ -969,7 +969,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
             "-DWRITABLE_ROOT_0_EXCLUDED_0={}",
             cwd.canonicalize()
                 .expect("canonicalize cwd")
-                .join(".codex")
+                .join(".empatra")
                 .display()
         ),
         format!(
@@ -996,7 +996,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         ),
         format!(
             "-DWRITABLE_ROOT_1_EXCLUDED_1={}",
-            dot_codex_canonical.to_string_lossy()
+            project_config_canonical.to_string_lossy()
         ),
         format!(
             "-DWRITABLE_ROOT_2={}",
@@ -1018,9 +1018,9 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
         .expect("seatbelt args should include command separator");
     assert_eq!(args[command_index + 1..], shell_command);
 
-    // Verify that .codex/config.toml cannot be modified under the generated
+    // Verify that .empatra/config.toml cannot be modified under the generated
     // Seatbelt policy.
-    let config_toml = dot_codex_canonical.join("config.toml");
+    let config_toml = project_config_canonical.join("config.toml");
     let output = Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
         .args(&args)
         .current_dir(&cwd)
@@ -1076,7 +1076,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
     );
     assert_seatbelt_denied(&output.stderr, &pre_commit_hook);
 
-    // Verify that writing a file to the folder containing .git and .codex is allowed.
+    // Verify that writing a file to the folder containing .git and .empatra is allowed.
     let allowed_file = vulnerable_root_canonical.join("allowed.txt");
     let shell_command_allowed: Vec<String> = [
         "bash",
@@ -1121,7 +1121,7 @@ fn create_seatbelt_args_with_read_only_git_and_codex_subpaths() {
 }
 
 #[test]
-fn create_seatbelt_args_block_first_time_dot_codex_creation_with_metadata_name_regex() {
+fn create_seatbelt_args_block_first_time_project_config_creation_with_metadata_name_regex() {
     let tmp = TempDir::new().expect("tempdir");
     let repo_root = tmp.path().join("repo");
     fs::create_dir_all(&repo_root).expect("create repo root");
@@ -1133,8 +1133,8 @@ fn create_seatbelt_args_block_first_time_dot_codex_creation_with_metadata_name_r
         .output()
         .expect("git init .");
 
-    let dot_codex = repo_root.join(".codex");
-    let config_toml = dot_codex.join("config.toml");
+    let project_config = repo_root.join(".empatra");
+    let config_toml = project_config.join("config.toml");
     let policy = SandboxPolicy::WorkspaceWrite {
         writable_roots: vec![repo_root.as_path().try_into().expect("absolute repo root")],
         network_access: false,
@@ -1147,7 +1147,7 @@ fn create_seatbelt_args_block_first_time_dot_codex_creation_with_metadata_name_r
         "-c",
         "mkdir -p \"$1\" && echo 'sandbox_mode = \"danger-full-access\"' > \"$2\"",
         "bash",
-        dot_codex.to_string_lossy().as_ref(),
+        project_config.to_string_lossy().as_ref(),
         config_toml.to_string_lossy().as_ref(),
     ]
     .iter()
@@ -1280,7 +1280,7 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         vulnerable_root_canonical,
         dot_git_canonical,
         dot_agents_canonical,
-        dot_codex_canonical,
+        project_config_canonical,
         ..
     } = populate_tmpdir(tmp.path());
 
@@ -1299,7 +1299,7 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         "-c",
         "echo 'sandbox_mode = \"danger-full-access\"' > \"$1\"",
         "bash",
-        dot_codex_canonical
+        project_config_canonical
             .join("config.toml")
             .to_string_lossy()
             .as_ref(),
@@ -1359,13 +1359,13 @@ fn create_seatbelt_args_for_cwd_as_git_repo() {
         args.contains(&expected_dot_git),
         "missing {expected_dot_git}: {args:#?}"
     );
-    let expected_dot_codex = format!(
+    let expected_project_config = format!(
         "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
-        dot_codex_canonical.to_string_lossy()
+        project_config_canonical.to_string_lossy()
     );
     assert!(
-        args.contains(&expected_dot_codex),
-        "missing {expected_dot_codex}: {args:#?}"
+        args.contains(&expected_project_config),
+        "missing {expected_project_config}: {args:#?}"
     );
     let unexpected_dot_agents = format!(
         "-DWRITABLE_ROOT_0_EXCLUDED_1={}",
@@ -1392,14 +1392,14 @@ struct PopulatedTmp {
     /// For the purposes of this test, we consider this a "vulnerable" root
     /// because a bad actor could write to .git/hooks/pre-commit so an
     /// unsuspecting user would run code as privileged the next time they
-    /// ran `git commit` themselves, or modified .codex/config.toml to
+    /// ran `git commit` themselves, or modified .empatra/config.toml to
     /// contain `sandbox_mode = "danger-full-access"` so the agent would
     /// have full privileges the next time it ran in that repo.
     vulnerable_root: PathBuf,
     vulnerable_root_canonical: PathBuf,
     dot_git_canonical: PathBuf,
     dot_agents_canonical: PathBuf,
-    dot_codex_canonical: PathBuf,
+    project_config_canonical: PathBuf,
 
     /// Path without protected metadata subfolders.
     empty_root: PathBuf,
@@ -1420,12 +1420,12 @@ fn populate_tmpdir(tmp: &Path) -> PopulatedTmp {
         .output()
         .expect("git init .");
 
-    fs::create_dir_all(vulnerable_root.join(".codex")).expect("create .codex");
+    fs::create_dir_all(vulnerable_root.join(".empatra")).expect("create .empatra");
     fs::write(
-        vulnerable_root.join(".codex").join("config.toml"),
+        vulnerable_root.join(".empatra").join("config.toml"),
         "sandbox_mode = \"read-only\"\n",
     )
-    .expect("write .codex/config.toml");
+    .expect("write .empatra/config.toml");
 
     let empty_root = tmp.join("empty_root");
     fs::create_dir_all(&empty_root).expect("create empty_root");
@@ -1436,14 +1436,14 @@ fn populate_tmpdir(tmp: &Path) -> PopulatedTmp {
         .expect("canonicalize vulnerable_root");
     let dot_git_canonical = vulnerable_root_canonical.join(".git");
     let dot_agents_canonical = vulnerable_root_canonical.join(".agents");
-    let dot_codex_canonical = vulnerable_root_canonical.join(".codex");
+    let project_config_canonical = vulnerable_root_canonical.join(".empatra");
     let empty_root_canonical = empty_root.canonicalize().expect("canonicalize empty_root");
     PopulatedTmp {
         vulnerable_root,
         vulnerable_root_canonical,
         dot_git_canonical,
         dot_agents_canonical,
-        dot_codex_canonical,
+        project_config_canonical,
         empty_root,
         empty_root_canonical,
     }

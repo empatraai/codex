@@ -641,7 +641,7 @@ class ProjectConfigLayerSource(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    dot_codex_folder: Annotated[AbsolutePathBuf, Field(alias="dotCodexFolder")]
+    project_config_folder: Annotated[AbsolutePathBuf, Field(alias="projectConfigFolder")]
     type: Annotated[Literal["project"], Field(title="ProjectConfigLayerSourceType")]
 
 
