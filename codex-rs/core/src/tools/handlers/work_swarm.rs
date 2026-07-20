@@ -40,7 +40,10 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationKind;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationMessage;
 use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationStatus;
 use codex_protocol::protocol::TurnWorkSwarmProgressEvent;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus;
 use codex_protocol::protocol::TurnWorkSwarmTaskKind;
@@ -1343,6 +1346,7 @@ Dependency results (authoritative JSON):\n{}\n\
 Task instructions:\n{}\n\
 \n\
 Completion contract:\n\
+- When you communicate with the orchestrator or another specialist, include run_id {} and a concise topic so the coordination is visible to the user.\n\
 - Call report_work_swarm_result exactly once.\n\
 - Pass run_id {}, task_id {}, and result_token {} unchanged.\n\
 - Return a JSON object in result.\n\
@@ -1358,6 +1362,7 @@ Completion contract:\n\
         run.title.as_deref().unwrap_or_default(),
         dependencies,
         task_spec.instructions,
+        run.id,
         run.id,
         task.id,
         task.result_token,
@@ -1622,6 +1627,19 @@ async fn fail_run(
     Ok(())
 }
 
+fn bounded_work_swarm_preview(content: &str) -> String {
+    const MAX_CHARS: usize = 1_024;
+    let normalized = content.trim();
+    let mut characters = normalized.chars();
+    let mut preview = characters.by_ref().take(MAX_CHARS).collect::<String>();
+    if characters.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
+const WORK_SWARM_VISIBLE_MESSAGE_LIMIT: usize = 200;
+
 async fn emit_work_swarm_progress(
     session: &Session,
     turn: &TurnContext,
@@ -1722,6 +1740,7 @@ async fn emit_work_swarm_progress(
                     SwarmTaskStatus::Escalated => TurnWorkSwarmTaskStatus::Escalated,
                     SwarmTaskStatus::Cancelled => TurnWorkSwarmTaskStatus::Cancelled,
                 },
+                summary: task.instructions.as_deref().map(bounded_work_swarm_preview),
                 depends_on: task
                     .depends_on_task_ids
                     .iter()
@@ -1740,6 +1759,83 @@ async fn emit_work_swarm_progress(
                 agent_path,
                 error: task.last_error.clone(),
             }
+        })
+        .collect();
+    let communication_messages = messages
+        .iter()
+        .rev()
+        .take(WORK_SWARM_VISIBLE_MESSAGE_LIMIT)
+        .rev()
+        .filter_map(|message| {
+            let sender_agent_path = message
+                .metadata_json
+                .get("author")
+                .and_then(Value::as_str)?
+                .to_string();
+            let recipient_agent_path = message
+                .metadata_json
+                .get("recipient")
+                .and_then(Value::as_str)?
+                .to_string();
+            let preview = message
+                .metadata_json
+                .get("message_preview")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let content_redacted = message
+                .metadata_json
+                .get("message_content_redacted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let kind = match message
+                .metadata_json
+                .get("communication_kind")
+                .and_then(Value::as_str)
+                .unwrap_or("message")
+            {
+                "spawn" => TurnWorkSwarmCommunicationKind::Spawn,
+                "followup" => TurnWorkSwarmCommunicationKind::Followup,
+                "result" => TurnWorkSwarmCommunicationKind::Result,
+                _ => TurnWorkSwarmCommunicationKind::Message,
+            };
+            let status = match message.status {
+                InterAgentMessageStatus::Queued => TurnWorkSwarmCommunicationStatus::Queued,
+                InterAgentMessageStatus::Delivered => TurnWorkSwarmCommunicationStatus::Delivered,
+                InterAgentMessageStatus::Acked => TurnWorkSwarmCommunicationStatus::Acked,
+                InterAgentMessageStatus::Expired => TurnWorkSwarmCommunicationStatus::Expired,
+                InterAgentMessageStatus::DeadLettered => {
+                    TurnWorkSwarmCommunicationStatus::DeadLettered
+                }
+                InterAgentMessageStatus::Cancelled => TurnWorkSwarmCommunicationStatus::Cancelled,
+            };
+            let sender_task_id = tasks
+                .iter()
+                .find(|task| {
+                    task.assigned_thread_id.as_deref() == Some(message.sender_thread_id.as_str())
+                })
+                .map(|task| local_task_id(run_id, task.id.as_str()).to_string());
+            let recipient_task_id = message.target_thread_id.as_deref().and_then(|thread_id| {
+                tasks
+                    .iter()
+                    .find(|task| task.assigned_thread_id.as_deref() == Some(thread_id))
+                    .map(|task| local_task_id(run_id, task.id.as_str()).to_string())
+            });
+            Some(TurnWorkSwarmCommunicationMessage {
+                id: message.id.clone(),
+                sender_agent_path,
+                recipient_agent_path,
+                sender_task_id,
+                recipient_task_id,
+                kind,
+                topic: message.topic.clone(),
+                status,
+                preview,
+                content_redacted,
+                created_at_ms: message.created_at.timestamp_millis(),
+                updated_at_ms: message.updated_at.timestamp_millis(),
+                correlation_id: message.correlation_id.clone(),
+                in_reply_to: message.in_reply_to.clone(),
+            })
         })
         .collect();
     let communication = TurnWorkSwarmCommunicationProgress {
@@ -1767,6 +1863,8 @@ async fn emit_work_swarm_progress(
             .iter()
             .filter(|message| message.status == InterAgentMessageStatus::Cancelled)
             .count() as i64,
+        messages: communication_messages,
+        messages_truncated: messages.len() > WORK_SWARM_VISIBLE_MESSAGE_LIMIT,
     };
     session
         .send_event(

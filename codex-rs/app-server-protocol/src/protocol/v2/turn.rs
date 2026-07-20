@@ -12,6 +12,8 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationKind as CoreTurnWorkSwarmCommunicationKind;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationStatus as CoreTurnWorkSwarmCommunicationStatus;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus as CoreTurnWorkSwarmProgressStatus;
 use codex_protocol::protocol::TurnWorkSwarmTaskKind as CoreTurnWorkSwarmTaskKind;
 use codex_protocol::protocol::TurnWorkSwarmTaskStatus as CoreTurnWorkSwarmTaskStatus;
@@ -34,6 +36,26 @@ v2_enum_from_core!(
         Running,
         Succeeded,
         Failed,
+        Cancelled
+    }
+);
+
+v2_enum_from_core!(
+    pub enum TurnWorkSwarmCommunicationKind from CoreTurnWorkSwarmCommunicationKind {
+        Spawn,
+        Message,
+        Followup,
+        Result
+    }
+);
+
+v2_enum_from_core!(
+    pub enum TurnWorkSwarmCommunicationStatus from CoreTurnWorkSwarmCommunicationStatus {
+        Queued,
+        Delivered,
+        Acked,
+        Expired,
+        DeadLettered,
         Cancelled
     }
 );
@@ -506,6 +528,9 @@ pub struct TurnWorkSwarmTaskProgress {
     #[ts(optional)]
     pub specialist: Option<String>,
     pub status: TurnWorkSwarmTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
     pub depends_on: Vec<String>,
     pub attempt: i64,
     pub max_attempts: i64,
@@ -534,6 +559,40 @@ pub struct TurnWorkSwarmCommunicationProgress {
     pub expired: i64,
     pub dead_lettered: i64,
     pub cancelled: i64,
+    pub messages: Vec<TurnWorkSwarmCommunicationMessage>,
+    pub messages_truncated: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnWorkSwarmCommunicationMessage {
+    pub id: String,
+    pub sender_agent_path: String,
+    pub recipient_agent_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sender_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recipient_task_id: Option<String>,
+    pub kind: TurnWorkSwarmCommunicationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic: Option<String>,
+    pub status: TurnWorkSwarmCommunicationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preview: Option<String>,
+    pub content_redacted: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub in_reply_to: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

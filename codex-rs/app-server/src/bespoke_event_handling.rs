@@ -81,6 +81,7 @@ use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnWorkSwarmCommunicationMessage;
 use codex_app_server_protocol::TurnWorkSwarmCommunicationProgress;
 use codex_app_server_protocol::TurnWorkSwarmProgressNotification;
 use codex_app_server_protocol::TurnWorkSwarmTaskProgress;
@@ -369,6 +370,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                         kind: task.kind.into(),
                         specialist: task.specialist,
                         status: task.status.into(),
+                        summary: task.summary,
                         depends_on: task.depends_on,
                         attempt: task.attempt,
                         max_attempts: task.max_attempts,
@@ -386,6 +388,28 @@ pub(crate) async fn apply_bespoke_event_handling(
                     expired: event.communication.expired,
                     dead_lettered: event.communication.dead_lettered,
                     cancelled: event.communication.cancelled,
+                    messages: event
+                        .communication
+                        .messages
+                        .into_iter()
+                        .map(|message| TurnWorkSwarmCommunicationMessage {
+                            id: message.id,
+                            sender_agent_path: message.sender_agent_path,
+                            recipient_agent_path: message.recipient_agent_path,
+                            sender_task_id: message.sender_task_id,
+                            recipient_task_id: message.recipient_task_id,
+                            kind: message.kind.into(),
+                            topic: message.topic,
+                            status: message.status.into(),
+                            preview: message.preview,
+                            content_redacted: message.content_redacted,
+                            created_at_ms: message.created_at_ms,
+                            updated_at_ms: message.updated_at_ms,
+                            correlation_id: message.correlation_id,
+                            in_reply_to: message.in_reply_to,
+                        })
+                        .collect(),
+                    messages_truncated: event.communication.messages_truncated,
                 },
             };
             outgoing

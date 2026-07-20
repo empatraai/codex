@@ -20375,6 +20375,92 @@
         "title": "TurnSteerResponse",
         "type": "object"
       },
+      "TurnWorkSwarmCommunicationKind": {
+        "enum": [
+          "spawn",
+          "message",
+          "followup",
+          "result"
+        ],
+        "type": "string"
+      },
+      "TurnWorkSwarmCommunicationMessage": {
+        "properties": {
+          "contentRedacted": {
+            "type": "boolean"
+          },
+          "correlationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAtMs": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inReplyTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/definitions/v2/TurnWorkSwarmCommunicationKind"
+          },
+          "preview": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipientAgentPath": {
+            "type": "string"
+          },
+          "recipientTaskId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "senderAgentPath": {
+            "type": "string"
+          },
+          "senderTaskId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/TurnWorkSwarmCommunicationStatus"
+          },
+          "topic": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updatedAtMs": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contentRedacted",
+          "createdAtMs",
+          "id",
+          "kind",
+          "recipientAgentPath",
+          "senderAgentPath",
+          "status",
+          "updatedAtMs"
+        ],
+        "type": "object"
+      },
       "TurnWorkSwarmCommunicationProgress": {
         "properties": {
           "acked": {
@@ -20397,6 +20483,15 @@
             "format": "int64",
             "type": "integer"
           },
+          "messages": {
+            "items": {
+              "$ref": "#/definitions/v2/TurnWorkSwarmCommunicationMessage"
+            },
+            "type": "array"
+          },
+          "messagesTruncated": {
+            "type": "boolean"
+          },
           "queued": {
             "format": "int64",
             "type": "integer"
@@ -20408,9 +20503,22 @@
           "deadLettered",
           "delivered",
           "expired",
+          "messages",
+          "messagesTruncated",
           "queued"
         ],
         "type": "object"
+      },
+      "TurnWorkSwarmCommunicationStatus": {
+        "enum": [
+          "queued",
+          "delivered",
+          "acked",
+          "expired",
+          "deadLettered",
+          "cancelled"
+        ],
+        "type": "string"
       },
       "TurnWorkSwarmProgressNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -20620,6 +20728,12 @@
           },
           "status": {
             "$ref": "#/definitions/v2/TurnWorkSwarmTaskStatus"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tokensUsed": {
             "format": "int64",

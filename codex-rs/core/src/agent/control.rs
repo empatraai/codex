@@ -52,6 +52,20 @@ use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
 
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const WORK_SWARM_MESSAGE_PREVIEW_CHARS: usize = 1_024;
+
+fn bounded_work_swarm_message_preview(content: &str) -> String {
+    let normalized = content.trim();
+    let mut characters = normalized.chars();
+    let mut preview = characters
+        .by_ref()
+        .take(WORK_SWARM_MESSAGE_PREVIEW_CHARS)
+        .collect::<String>();
+    if characters.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
 
 mod execution;
 mod legacy;
@@ -241,6 +255,7 @@ impl AgentControl {
                     agent_id,
                     &communication_id,
                     &communication,
+                    &context,
                 )
                 .await?,
             );
@@ -349,11 +364,13 @@ impl AgentControl {
         target_thread_id: ThreadId,
         message_id: &str,
         communication: &InterAgentCommunication,
+        context: &AgentCommunicationContext,
     ) -> CodexResult<String> {
         let sender_thread_id = sender_thread_id.to_string();
         let target_thread_id = target_thread_id.to_string();
         let metadata_json = json!({
             "kind": "inter_agent_communication",
+            "communication_kind": context.kind().as_str(),
             "author": communication.author.to_string(),
             "recipient": communication.recipient.to_string(),
             "other_recipients": communication.other_recipients.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -364,6 +381,16 @@ impl AgentControl {
             "run_id": communication.run_id,
             "correlation_id": communication.correlation_id,
             "in_reply_to": communication.in_reply_to,
+            "message_preview": communication.run_id.as_ref().and_then(|_| {
+                communication
+                    .encrypted_content
+                    .is_none()
+                    .then(|| bounded_work_swarm_message_preview(communication.content.as_str()))
+            }),
+            "message_content_redacted": communication
+                .run_id
+                .as_ref()
+                .map(|_| communication.encrypted_content.is_some()),
         });
         let delivery_id = uuid::Uuid::now_v7().to_string();
         let params = codex_state::SwarmMessageCreateParams {

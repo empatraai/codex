@@ -2078,6 +2078,9 @@ pub struct TurnWorkSwarmTaskProgress {
     #[ts(optional)]
     pub specialist: Option<String>,
     pub status: TurnWorkSwarmTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub summary: Option<String>,
     pub depends_on: Vec<String>,
     pub attempt: i64,
     pub max_attempts: i64,
@@ -2104,6 +2107,60 @@ pub struct TurnWorkSwarmCommunicationProgress {
     pub expired: i64,
     pub dead_lettered: i64,
     pub cancelled: i64,
+    pub messages: Vec<TurnWorkSwarmCommunicationMessage>,
+    pub messages_truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnWorkSwarmCommunicationMessage {
+    pub id: String,
+    pub sender_agent_path: String,
+    pub recipient_agent_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sender_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recipient_task_id: Option<String>,
+    pub kind: TurnWorkSwarmCommunicationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic: Option<String>,
+    pub status: TurnWorkSwarmCommunicationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preview: Option<String>,
+    pub content_redacted: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub in_reply_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TurnWorkSwarmCommunicationKind {
+    Spawn,
+    Message,
+    Followup,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TurnWorkSwarmCommunicationStatus {
+    Queued,
+    Delivered,
+    Acked,
+    Expired,
+    DeadLettered,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

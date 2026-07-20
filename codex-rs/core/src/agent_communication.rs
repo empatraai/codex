@@ -12,7 +12,7 @@ pub(crate) enum AgentCommunicationKind {
 }
 
 impl AgentCommunicationKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Spawn => "spawn",
             Self::Message => "message",
@@ -38,6 +38,10 @@ impl AgentCommunicationContext {
 
     pub(crate) fn sender_thread_id(&self) -> ThreadId {
         self.sender_thread_id
+    }
+
+    pub(crate) fn kind(&self) -> AgentCommunicationKind {
+        self.kind
     }
 }
 
