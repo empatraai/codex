@@ -571,13 +571,13 @@ imagegenext = true
 {code_mode_only}
 
 [model_providers.openai-custom]
-name = "OpenAI"
+name = "Empatra test gateway"
 base_url = "{server_uri}/api/codex"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
 supports_websockets = false
-requires_openai_auth = true
+requires_openai_auth = false
 "#
         ),
     )

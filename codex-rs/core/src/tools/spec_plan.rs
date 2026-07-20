@@ -403,12 +403,12 @@ fn image_generation_runtime_enabled(turn_context: &TurnContext) -> bool {
 }
 
 fn standalone_image_generation_model_visible(turn_context: &TurnContext) -> bool {
-    if !image_generation_runtime_enabled(turn_context) || !namespace_tools_enabled(turn_context) {
+    if !namespace_tools_enabled(turn_context) {
         return false;
     }
 
     if turn_context.model_info.use_responses_lite {
-        return true;
+        return image_generation_runtime_enabled(turn_context);
     }
 
     turn_context
