@@ -40,8 +40,13 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress;
 use codex_protocol::protocol::TurnWorkSwarmProgressEvent;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus;
+use codex_protocol::protocol::TurnWorkSwarmTaskKind;
+use codex_protocol::protocol::TurnWorkSwarmTaskProgress;
+use codex_protocol::protocol::TurnWorkSwarmTaskStatus;
+use codex_state::InterAgentMessageStatus;
 use codex_state::SwarmAttemptStatus;
 use codex_state::SwarmRun;
 use codex_state::SwarmRunStatus;
@@ -1621,24 +1626,19 @@ async fn emit_work_swarm_progress(
     session: &Session,
     turn: &TurnContext,
     run_id: &str,
-    status: TurnWorkSwarmProgressStatus,
+    _status: TurnWorkSwarmProgressStatus,
     task_id: Option<&str>,
     error: Option<&str>,
 ) {
     let Some(db) = session.state_db() else {
         return;
     };
-    let Ok(progress) = db.get_swarm_run_progress(run_id).await else {
+    let Ok((Some(run), tasks, _, messages, _)) = db.load_swarm_recovery_data(run_id).await else {
         return;
     };
-    let Ok(Some(run)) = db.get_swarm_run(run_id).await else {
-        return;
-    };
-    let task = if let Some(task_id) = task_id {
-        db.get_swarm_task(task_id).await.ok().flatten()
-    } else {
-        None
-    };
+    let task = task_id
+        .and_then(|task_id| tasks.iter().find(|task| task.id == task_id))
+        .cloned();
     let model = task
         .as_ref()
         .and_then(|task| task.model_candidate_json.as_ref())
@@ -1659,21 +1659,131 @@ async fn emit_work_swarm_progress(
     } else {
         None
     };
+    let status = match run.status {
+        SwarmRunStatus::Pending => TurnWorkSwarmProgressStatus::Pending,
+        SwarmRunStatus::Running => TurnWorkSwarmProgressStatus::Running,
+        SwarmRunStatus::Completed => TurnWorkSwarmProgressStatus::Succeeded,
+        SwarmRunStatus::Failed => TurnWorkSwarmProgressStatus::Failed,
+        SwarmRunStatus::Cancelled => TurnWorkSwarmProgressStatus::Cancelled,
+    };
+    let queued = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.status,
+                SwarmTaskStatus::Pending
+                    | SwarmTaskStatus::Ready
+                    | SwarmTaskStatus::Retryable
+                    | SwarmTaskStatus::Escalated
+            )
+        })
+        .count() as i64;
+    let running = tasks
+        .iter()
+        .filter(|task| task.status == SwarmTaskStatus::Running)
+        .count() as i64;
+    let succeeded = tasks
+        .iter()
+        .filter(|task| task.status == SwarmTaskStatus::Completed)
+        .count() as i64;
+    let failed = tasks
+        .iter()
+        .filter(|task| task.status == SwarmTaskStatus::Failed)
+        .count() as i64;
+    let cancelled = tasks
+        .iter()
+        .filter(|task| task.status == SwarmTaskStatus::Cancelled)
+        .count() as i64;
+    let task_snapshots = tasks
+        .iter()
+        .map(|task| {
+            let agent_path = task
+                .assigned_thread_id
+                .as_deref()
+                .and_then(|value| ThreadId::from_string(value).ok())
+                .and_then(|thread_id| session.services.agent_control.get_agent_metadata(thread_id))
+                .and_then(|metadata| metadata.agent_path)
+                .map(|path| path.to_string());
+            TurnWorkSwarmTaskProgress {
+                id: local_task_id(run_id, task.id.as_str()).to_string(),
+                kind: match task.task_kind.as_str() {
+                    "reducer" => TurnWorkSwarmTaskKind::Reducer,
+                    "reviewer" => TurnWorkSwarmTaskKind::Reviewer,
+                    _ => TurnWorkSwarmTaskKind::Worker,
+                },
+                specialist: task.agent_type.clone(),
+                status: match task.status {
+                    SwarmTaskStatus::Pending => TurnWorkSwarmTaskStatus::Pending,
+                    SwarmTaskStatus::Ready => TurnWorkSwarmTaskStatus::Ready,
+                    SwarmTaskStatus::Running => TurnWorkSwarmTaskStatus::Running,
+                    SwarmTaskStatus::Completed => TurnWorkSwarmTaskStatus::Succeeded,
+                    SwarmTaskStatus::Failed => TurnWorkSwarmTaskStatus::Failed,
+                    SwarmTaskStatus::Retryable => TurnWorkSwarmTaskStatus::Retryable,
+                    SwarmTaskStatus::Escalated => TurnWorkSwarmTaskStatus::Escalated,
+                    SwarmTaskStatus::Cancelled => TurnWorkSwarmTaskStatus::Cancelled,
+                },
+                depends_on: task
+                    .depends_on_task_ids
+                    .iter()
+                    .map(|dependency_id| local_task_id(run_id, dependency_id).to_string())
+                    .collect(),
+                attempt: task.attempt_count,
+                max_attempts: task.max_attempts,
+                tokens_used: task.token_usage,
+                model: task
+                    .model_candidate_json
+                    .as_ref()
+                    .and_then(|candidate| candidate.get("model"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                fallback_reason: task.fallback_reason.clone(),
+                agent_path,
+                error: task.last_error.clone(),
+            }
+        })
+        .collect();
+    let communication = TurnWorkSwarmCommunicationProgress {
+        queued: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::Queued)
+            .count() as i64,
+        delivered: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::Delivered)
+            .count() as i64,
+        acked: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::Acked)
+            .count() as i64,
+        expired: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::Expired)
+            .count() as i64,
+        dead_lettered: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::DeadLettered)
+            .count() as i64,
+        cancelled: messages
+            .iter()
+            .filter(|message| message.status == InterAgentMessageStatus::Cancelled)
+            .count() as i64,
+    };
     session
         .send_event(
             turn,
             EventMsg::TurnWorkSwarmProgress(TurnWorkSwarmProgressEvent {
                 run_id: run_id.to_string(),
                 status,
-                total: progress.total_tasks as i64,
-                queued: (progress.pending_tasks
-                    + progress.ready_tasks
-                    + progress.retryable_tasks
-                    + progress.escalated_tasks) as i64,
-                running: progress.running_tasks as i64,
-                succeeded: progress.completed_tasks as i64,
-                failed: progress.failed_tasks as i64,
-                cancelled: progress.cancelled_tasks as i64,
+                title: run.title,
+                max_concurrency: run.max_concurrency,
+                runtime_used_seconds: run.runtime_usage_seconds,
+                runtime_budget_seconds: run.runtime_budget_seconds,
+                total: tasks.len() as i64,
+                queued,
+                running,
+                succeeded,
+                failed,
+                cancelled,
                 skipped: 0,
                 tokens_used: run.token_usage,
                 token_budget: run.token_budget,
@@ -1689,6 +1799,8 @@ async fn emit_work_swarm_progress(
                 error: error
                     .map(str::to_string)
                     .or_else(|| task.and_then(|task| task.last_error)),
+                tasks: task_snapshots,
+                communication,
             }),
         )
         .await;

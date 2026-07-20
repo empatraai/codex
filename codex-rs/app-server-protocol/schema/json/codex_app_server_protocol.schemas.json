@@ -20375,6 +20375,43 @@
         "title": "TurnSteerResponse",
         "type": "object"
       },
+      "TurnWorkSwarmCommunicationProgress": {
+        "properties": {
+          "acked": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "cancelled": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "deadLettered": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "delivered": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expired": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "queued": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "acked",
+          "cancelled",
+          "deadLettered",
+          "delivered",
+          "expired",
+          "queued"
+        ],
+        "type": "object"
+      },
       "TurnWorkSwarmProgressNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -20387,6 +20424,9 @@
           "cancelled": {
             "format": "int64",
             "type": "integer"
+          },
+          "communication": {
+            "$ref": "#/definitions/v2/TurnWorkSwarmCommunicationProgress"
           },
           "error": {
             "type": [
@@ -20404,6 +20444,10 @@
               "null"
             ]
           },
+          "maxConcurrency": {
+            "format": "int64",
+            "type": "integer"
+          },
           "model": {
             "type": [
               "string",
@@ -20418,6 +20462,17 @@
             "type": "string"
           },
           "running": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "runtimeBudgetSeconds": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "runtimeUsedSeconds": {
             "format": "int64",
             "type": "integer"
           },
@@ -20438,8 +20493,20 @@
               "null"
             ]
           },
+          "tasks": {
+            "items": {
+              "$ref": "#/definitions/v2/TurnWorkSwarmTaskProgress"
+            },
+            "type": "array"
+          },
           "threadId": {
             "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "tokenBudget": {
             "format": "int64",
@@ -20462,13 +20529,17 @@
         },
         "required": [
           "cancelled",
+          "communication",
           "failed",
+          "maxConcurrency",
           "queued",
           "runId",
           "running",
+          "runtimeUsedSeconds",
           "skipped",
           "status",
           "succeeded",
+          "tasks",
           "threadId",
           "tokensUsed",
           "total",
@@ -20483,6 +20554,98 @@
           "running",
           "succeeded",
           "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "TurnWorkSwarmTaskKind": {
+        "enum": [
+          "worker",
+          "reducer",
+          "reviewer"
+        ],
+        "type": "string"
+      },
+      "TurnWorkSwarmTaskProgress": {
+        "properties": {
+          "agentPath": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attempt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "dependsOn": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fallbackReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/definitions/v2/TurnWorkSwarmTaskKind"
+          },
+          "maxAttempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "specialist": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/TurnWorkSwarmTaskStatus"
+          },
+          "tokensUsed": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attempt",
+          "dependsOn",
+          "id",
+          "kind",
+          "maxAttempts",
+          "status",
+          "tokensUsed"
+        ],
+        "type": "object"
+      },
+      "TurnWorkSwarmTaskStatus": {
+        "enum": [
+          "pending",
+          "ready",
+          "running",
+          "succeeded",
+          "failed",
+          "retryable",
+          "escalated",
           "cancelled"
         ],
         "type": "string"

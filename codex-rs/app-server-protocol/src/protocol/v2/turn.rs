@@ -13,6 +13,8 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus as CoreTurnWorkSwarmProgressStatus;
+use codex_protocol::protocol::TurnWorkSwarmTaskKind as CoreTurnWorkSwarmTaskKind;
+use codex_protocol::protocol::TurnWorkSwarmTaskStatus as CoreTurnWorkSwarmTaskStatus;
 use codex_protocol::user_input::ByteRange as CoreByteRange;
 use codex_protocol::user_input::TextElement as CoreTextElement;
 use codex_protocol::user_input::UserInput as CoreUserInput;
@@ -32,6 +34,27 @@ v2_enum_from_core!(
         Running,
         Succeeded,
         Failed,
+        Cancelled
+    }
+);
+
+v2_enum_from_core!(
+    pub enum TurnWorkSwarmTaskKind from CoreTurnWorkSwarmTaskKind {
+        Worker,
+        Reducer,
+        Reviewer
+    }
+);
+
+v2_enum_from_core!(
+    pub enum TurnWorkSwarmTaskStatus from CoreTurnWorkSwarmTaskStatus {
+        Pending,
+        Ready,
+        Running,
+        Succeeded,
+        Failed,
+        Retryable,
+        Escalated,
         Cancelled
     }
 );
@@ -435,6 +458,14 @@ pub struct TurnWorkSwarmProgressNotification {
     pub turn_id: String,
     pub run_id: String,
     pub status: TurnWorkSwarmProgressStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    pub max_concurrency: i64,
+    pub runtime_used_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_budget_seconds: Option<i64>,
     pub total: i64,
     pub queued: i64,
     pub running: i64,
@@ -461,6 +492,48 @@ pub struct TurnWorkSwarmProgressNotification {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    pub tasks: Vec<TurnWorkSwarmTaskProgress>,
+    pub communication: TurnWorkSwarmCommunicationProgress,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnWorkSwarmTaskProgress {
+    pub id: String,
+    pub kind: TurnWorkSwarmTaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub specialist: Option<String>,
+    pub status: TurnWorkSwarmTaskStatus,
+    pub depends_on: Vec<String>,
+    pub attempt: i64,
+    pub max_attempts: i64,
+    pub tokens_used: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct TurnWorkSwarmCommunicationProgress {
+    pub queued: i64,
+    pub delivered: i64,
+    pub acked: i64,
+    pub expired: i64,
+    pub dead_lettered: i64,
+    pub cancelled: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

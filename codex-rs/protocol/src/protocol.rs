@@ -2032,6 +2032,14 @@ pub struct ModelRerouteEvent {
 pub struct TurnWorkSwarmProgressEvent {
     pub run_id: String,
     pub status: TurnWorkSwarmProgressStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    pub max_concurrency: i64,
+    pub runtime_used_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_budget_seconds: Option<i64>,
     pub total: i64,
     pub queued: i64,
     pub running: i64,
@@ -2058,6 +2066,44 @@ pub struct TurnWorkSwarmProgressEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+    pub tasks: Vec<TurnWorkSwarmTaskProgress>,
+    pub communication: TurnWorkSwarmCommunicationProgress,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnWorkSwarmTaskProgress {
+    pub id: String,
+    pub kind: TurnWorkSwarmTaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub specialist: Option<String>,
+    pub status: TurnWorkSwarmTaskStatus,
+    pub depends_on: Vec<String>,
+    pub attempt: i64,
+    pub max_attempts: i64,
+    pub tokens_used: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnWorkSwarmCommunicationProgress {
+    pub queued: i64,
+    pub delivered: i64,
+    pub acked: i64,
+    pub expired: i64,
+    pub dead_lettered: i64,
+    pub cancelled: i64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -2068,6 +2114,29 @@ pub enum TurnWorkSwarmProgressStatus {
     Running,
     Succeeded,
     Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TurnWorkSwarmTaskKind {
+    Worker,
+    Reducer,
+    Reviewer,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TurnWorkSwarmTaskStatus {
+    Pending,
+    Ready,
+    Running,
+    Succeeded,
+    Failed,
+    Retryable,
+    Escalated,
     Cancelled,
 }
 

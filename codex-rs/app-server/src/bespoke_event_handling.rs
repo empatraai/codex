@@ -81,7 +81,9 @@ use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnWorkSwarmCommunicationProgress;
 use codex_app_server_protocol::TurnWorkSwarmProgressNotification;
+use codex_app_server_protocol::TurnWorkSwarmTaskProgress;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
@@ -341,6 +343,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 turn_id: event_turn_id.clone(),
                 run_id: event.run_id,
                 status: event.status.into(),
+                title: event.title,
+                max_concurrency: event.max_concurrency,
+                runtime_used_seconds: event.runtime_used_seconds,
+                runtime_budget_seconds: event.runtime_budget_seconds,
                 total: event.total,
                 queued: event.queued,
                 running: event.running,
@@ -355,6 +361,32 @@ pub(crate) async fn apply_bespoke_event_handling(
                 model: event.model,
                 fallback_reason: event.fallback_reason,
                 error: event.error,
+                tasks: event
+                    .tasks
+                    .into_iter()
+                    .map(|task| TurnWorkSwarmTaskProgress {
+                        id: task.id,
+                        kind: task.kind.into(),
+                        specialist: task.specialist,
+                        status: task.status.into(),
+                        depends_on: task.depends_on,
+                        attempt: task.attempt,
+                        max_attempts: task.max_attempts,
+                        tokens_used: task.tokens_used,
+                        model: task.model,
+                        fallback_reason: task.fallback_reason,
+                        agent_path: task.agent_path,
+                        error: task.error,
+                    })
+                    .collect(),
+                communication: TurnWorkSwarmCommunicationProgress {
+                    queued: event.communication.queued,
+                    delivered: event.communication.delivered,
+                    acked: event.communication.acked,
+                    expired: event.communication.expired,
+                    dead_lettered: event.communication.dead_lettered,
+                    cancelled: event.communication.cancelled,
+                },
             };
             outgoing
                 .send_server_notification(ServerNotification::TurnWorkSwarmProgress(notification))
