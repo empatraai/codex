@@ -17,12 +17,16 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_config::config_toml::AgentModelCandidateToml;
+use codex_config::config_toml::AgentModelRouteToml;
+use codex_config::config_toml::AgentModelRoutingToml;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::built_in_model_providers;
+use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -36,6 +40,7 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AgentStatus;
@@ -63,6 +68,7 @@ use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -388,7 +394,7 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
+            "Full-history forked agents inherit parent routing exactly; omit agent_type, or spawn without a full-history fork.".to_string(),
         )
     );
 }
@@ -863,12 +869,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        task_name: String,
-    }
-
+async fn multi_agent_v2_full_history_fork_rejects_routing_overrides() {
     let (mut session, turn) = make_session_and_context().await;
     let mut turn = turn
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
@@ -889,6 +890,65 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
+    let err = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session,
+            turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "fork_with_tier",
+                "model": "gpt-5.4",
+                "reasoning_effort": "medium",
+                "service_tier": ServiceTier::Fast.request_value()
+            })),
+        ))
+        .await
+        .err()
+        .expect("multi-agent v2 full-history fork should reject routing overrides");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Full-history forked agents inherit parent routing exactly; omit model, reasoning_effort, service_tier, or spawn without a full-history fork."
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_full_history_fork_does_not_apply_default_child_model() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+        .await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.agent_default_subagent_model = Some("gpt-5.3-codex".to_string());
+    config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::Low);
+    set_turn_config(&mut turn, config);
+    let parent_reasoning_effort = turn
+        .reasoning_effort
+        .clone()
+        .or_else(|| turn.model_info.default_reasoning_level.clone());
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
             session.clone(),
@@ -896,12 +956,12 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "fork_with_tier",
-                "service_tier": ServiceTier::Fast.request_value()
+                "task_name": "full_inherit",
+                "fork_turns": "all"
             })),
         ))
         .await
-        .expect("multi-agent v2 full-history fork should accept explicit service tier");
+        .expect("full-history spawn should inherit parent routing");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -922,10 +982,107 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .config_snapshot()
         .await;
 
-    assert_eq!(
-        snapshot.service_tier,
-        Some(ServiceTier::Fast.request_value().to_string())
-    );
+    assert_eq!(snapshot.model, "gpt-5.4");
+    assert_eq!(snapshot.reasoning_effort, parent_reasoning_effort);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_uses_first_compatible_specialist_model_candidate() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        task_name: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.agent_model_routing = AgentModelRoutingToml {
+        enabled: Some(true),
+        routes: BTreeMap::from([(
+            "explorer".to_string(),
+            AgentModelRouteToml {
+                candidates: vec![
+                    AgentModelCandidateToml {
+                        model: "missing-cheap-model".to_string(),
+                        reasoning_effort: Some(ReasoningEffort::Low),
+                        service_tier: None,
+                    },
+                    AgentModelCandidateToml {
+                        model: "gpt-5.6-terra".to_string(),
+                        reasoning_effort: Some(ReasoningEffort::Medium),
+                        service_tier: None,
+                    },
+                ],
+                max_attempts: Some(2),
+                timeout_seconds: Some(300),
+            },
+        )]),
+    };
+    let mut specialist_model = turn.model_info.clone();
+    specialist_model.slug = "gpt-5.6-terra".to_string();
+    specialist_model.display_name = "gpt-5.6-terra".to_string();
+    specialist_model.default_reasoning_level = Some(ReasoningEffort::Medium);
+    specialist_model.supported_reasoning_levels = vec![ReasoningEffortPreset {
+        effort: ReasoningEffort::Medium,
+        description: String::new(),
+    }];
+    specialist_model.multi_agent_version = Some(MultiAgentVersion::V2);
+    session.services.models_manager = Arc::new(StaticModelsManager::new(
+        Some(Arc::clone(&session.services.auth_manager)),
+        ModelsResponse {
+            models: vec![specialist_model],
+        },
+    ));
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "economical_explorer",
+                "agent_type": "explorer",
+                "fork_turns": "none"
+            })),
+        ))
+        .await
+        .expect("compatible specialist fallback should spawn");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(
+            session.thread_id,
+            &turn.session_source,
+            result.task_name.as_str(),
+        )
+        .await
+        .expect("spawned task name should resolve");
+    let snapshot = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(snapshot.model, "gpt-5.6-terra");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Medium));
 }
 
 #[tokio::test]
@@ -1904,9 +2061,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     let FunctionCallError::RespondToModel(message) = err else {
         panic!("expected model-facing parse error");
     };
-    assert!(message.starts_with(
-        "failed to parse function arguments: unknown field `interrupt`, expected `target` or `message`"
-    ));
+    assert!(message.starts_with("failed to parse function arguments: unknown field `interrupt`"));
 
     let ops = manager.captured_ops();
     let ops_for_agent: Vec<&Op> = ops

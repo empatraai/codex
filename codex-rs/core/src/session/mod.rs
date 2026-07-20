@@ -2837,6 +2837,15 @@ impl Session {
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
     ) -> Arc<StepContext> {
+        crate::tools::handlers::work_swarm::resume_active_work_swarms(self, &turn_context).await;
+        if let Some(state_db) = self.state_db() {
+            if let Err(err) = state_db.expire_inter_agent_messages().await {
+                warn!("failed to expire stale inter-agent messages: {err:#}");
+            }
+            if let Err(err) = state_db.expire_inter_agent_message_deliveries().await {
+                warn!("failed to expire stale inter-agent deliveries: {err:#}");
+            }
+        }
         let deferred_executor_enabled = turn_context
             .config
             .features
@@ -2879,6 +2888,36 @@ impl Session {
         mut communication: InterAgentCommunication,
     ) {
         communication.set_turn_id_if_missing(&turn_context.sub_id);
+        let state_db = self.state_db();
+        if let (Some(state_db), Some(message_id)) = (state_db.as_ref(), communication.id.as_deref())
+        {
+            match state_db.get_inter_agent_message(message_id).await {
+                Ok(Some(message))
+                    if matches!(
+                        message.status,
+                        codex_state::InterAgentMessageStatus::Expired
+                            | codex_state::InterAgentMessageStatus::DeadLettered
+                            | codex_state::InterAgentMessageStatus::Cancelled
+                    ) || message
+                        .expires_at
+                        .is_some_and(|expires_at| expires_at <= Utc::now()) =>
+                {
+                    let _ = state_db
+                        .expire_inter_agent_message_and_deliveries_by_message_id(message_id)
+                        .await
+                        .map_err(|err| {
+                            warn!(
+                                "failed to expire inter-agent message {message_id} before recording: {err:#}"
+                            )
+                        });
+                    return;
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    "failed to inspect inter-agent message {message_id} before recording: {err:#}"
+                ),
+            }
+        }
         let response_item = communication.to_model_input_item();
         let items = self.prepare_conversation_items_for_history(
             turn_context,
@@ -2901,6 +2940,17 @@ impl Session {
             RolloutItem::ResponseItem(response_item),
         ])
         .await;
+        if let Some(state_db) = state_db
+            && let Some(message_id) = communication.id.as_deref()
+        {
+            let target_thread_id = self.thread_id.to_string();
+            let _ = state_db
+                .ack_inter_agent_message_for_target(message_id, target_thread_id.as_str())
+                .await
+                .map_err(|err| {
+                    warn!("failed to ack inter-agent message delivery for {message_id}: {err:#}")
+                });
+        }
         self.send_raw_response_items(turn_context, items).await;
     }
 

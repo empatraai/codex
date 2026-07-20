@@ -21,6 +21,7 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::config_toml::AgentModelRoutingToml;
 use codex_config::config_toml::ConfigLockfileToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
@@ -864,6 +865,9 @@ pub struct Config {
 
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
+
+    /// Ordered, per-specialist model routes for economical subagent execution.
+    pub agent_model_routing: AgentModelRoutingToml,
 
     /// Maximum runtime in seconds for agent job workers before they are failed.
     pub agent_job_max_runtime_seconds: Option<u64>,
@@ -2954,6 +2958,66 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
     Ok(())
 }
 
+fn validate_agent_model_routing(routing: &AgentModelRoutingToml) -> std::io::Result<()> {
+    for (agent_type, route) in &routing.routes {
+        if agent_type.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.model_routing.routes keys must not be empty",
+            ));
+        }
+        if route.candidates.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "agents.model_routing.routes.{agent_type}.candidates must contain at least one model"
+                ),
+            ));
+        }
+        if route.max_attempts == Some(0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("agents.model_routing.routes.{agent_type}.max_attempts must be at least 1"),
+            ));
+        }
+        if route.timeout_seconds == Some(0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "agents.model_routing.routes.{agent_type}.timeout_seconds must be at least 1"
+                ),
+            ));
+        }
+
+        let mut seen = HashSet::new();
+        for (index, candidate) in route.candidates.iter().enumerate() {
+            let model = candidate.model.trim();
+            if model.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.model_routing.routes.{agent_type}.candidates[{index}].model must not be empty"
+                    ),
+                ));
+            }
+            let key = (
+                model.to_string(),
+                candidate.reasoning_effort.clone(),
+                candidate.service_tier.clone(),
+            );
+            if !seen.insert(key) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.model_routing.routes.{agent_type}.candidates contains a duplicate candidate for `{model}`"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
@@ -3551,6 +3615,12 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.default_subagent_reasoning_effort.clone());
+        let agent_model_routing = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.model_routing.clone())
+            .unwrap_or_default();
+        validate_agent_model_routing(&agent_model_routing)?;
         let agent_job_max_runtime_seconds = cfg
             .agents
             .as_ref()
@@ -3905,6 +3975,7 @@ impl Config {
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
+            agent_model_routing,
             agent_max_depth,
             agent_roles,
             memories: memories_config,

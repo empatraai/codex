@@ -73,10 +73,15 @@ impl InputQueue {
         &self,
         communication: InterAgentCommunication,
     ) {
-        self.mailbox_pending_mails
-            .lock()
-            .await
-            .push_back(communication);
+        let mut mailbox_pending_mails = self.mailbox_pending_mails.lock().await;
+        let insert_at = mailbox_pending_mails
+            .iter()
+            .position(|pending| {
+                communication.priority.clone().unwrap_or_default().rank()
+                    > pending.priority.clone().unwrap_or_default().rank()
+            })
+            .unwrap_or(mailbox_pending_mails.len());
+        mailbox_pending_mails.insert(insert_at, communication);
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
@@ -271,14 +276,17 @@ mod tests {
         recipient: AgentPath,
         content: &str,
         trigger_turn: bool,
+        priority: codex_protocol::protocol::InterAgentCommunicationPriority,
     ) -> InterAgentCommunication {
-        InterAgentCommunication::new(
+        let mut communication = InterAgentCommunication::new(
             author,
             recipient,
             Vec::new(),
             content.to_string(),
             trigger_turn,
-        )
+        );
+        communication.priority = Some(priority);
+        communication
     }
 
     #[tokio::test]
@@ -294,6 +302,7 @@ mod tests {
                 AgentPath::try_from("/root/worker").expect("agent path"),
                 "one",
                 /*trigger_turn*/ false,
+                codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
             ))
             .await;
         input_queue
@@ -302,6 +311,7 @@ mod tests {
                 AgentPath::try_from("/root/worker").expect("agent path"),
                 "two",
                 /*trigger_turn*/ false,
+                codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
             ))
             .await;
 
@@ -368,12 +378,14 @@ mod tests {
             AgentPath::try_from("/root/worker").expect("agent path"),
             "one",
             /*trigger_turn*/ false,
+            codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
         );
         let mail_two = make_mail(
             AgentPath::try_from("/root/worker").expect("agent path"),
             AgentPath::root(),
             "two",
             /*trigger_turn*/ true,
+            codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
         );
 
         input_queue
@@ -403,6 +415,7 @@ mod tests {
                 AgentPath::try_from("/root/worker").expect("agent path"),
                 "queued",
                 /*trigger_turn*/ false,
+                codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
             ))
             .await;
         assert!(!input_queue.has_trigger_turn_mailbox_items().await);
@@ -413,8 +426,54 @@ mod tests {
                 AgentPath::try_from("/root/worker").expect("agent path"),
                 "wake",
                 /*trigger_turn*/ true,
+                codex_protocol::protocol::InterAgentCommunicationPriority::Normal,
             ))
             .await;
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn input_queue_orders_higher_priority_first_with_fifo_within_priority() {
+        let input_queue = InputQueue::new();
+        let low_one = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "low-one",
+            false,
+            codex_protocol::protocol::InterAgentCommunicationPriority::Low,
+        );
+        let high = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "high",
+            false,
+            codex_protocol::protocol::InterAgentCommunicationPriority::High,
+        );
+        let low_two = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "low-two",
+            false,
+            codex_protocol::protocol::InterAgentCommunicationPriority::Low,
+        );
+
+        input_queue
+            .enqueue_mailbox_communication(low_one.clone())
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(high.clone())
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(low_two.clone())
+            .await;
+
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await,
+            vec![
+                TurnInput::InterAgentCommunication(high),
+                TurnInput::InterAgentCommunication(low_one),
+                TurnInput::InterAgentCommunication(low_two),
+            ]
+        );
     }
 }

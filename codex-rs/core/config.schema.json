@@ -6,6 +6,75 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentModelCandidateToml": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "description": "Model slug from the active provider model catalog.",
+          "type": "string"
+        },
+        "reasoning_effort": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            }
+          ],
+          "description": "Optional reasoning effort for this candidate."
+        },
+        "service_tier": {
+          "description": "Optional service tier requested for this candidate.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "AgentModelRouteToml": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "default": [],
+          "description": "Ordered candidates, cheapest/fastest suitable model first.",
+          "items": {
+            "$ref": "#/definitions/AgentModelCandidateToml"
+          },
+          "type": "array"
+        },
+        "max_attempts": {
+          "description": "Maximum objective-failure attempts for a task using this route.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "description": "Optional per-attempt runtime bound.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "AgentModelRoutingToml": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enables specialist routing. Defaults to true when routes are configured.",
+          "type": "boolean"
+        },
+        "routes": {
+          "additionalProperties": {
+            "$ref": "#/definitions/AgentModelRouteToml"
+          },
+          "default": {},
+          "description": "Specialist routes keyed by the exact `agent_type` used by `spawn_agent`.",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -72,6 +141,14 @@
           "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
           "format": "int32",
           "type": "integer"
+        },
+        "model_routing": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentModelRoutingToml"
+            }
+          ],
+          "description": "Economical, ordered model routes keyed by specialist agent type.\n\nA route is consulted only when a spawn call does not explicitly select a model. The first available and compatible candidate is selected; later candidates are deterministic fallbacks for unavailable models and bounded objective execution failures."
         }
       },
       "type": "object"

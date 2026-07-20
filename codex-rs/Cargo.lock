@@ -2684,6 +2684,7 @@ dependencies = [
  "codex-shell-command",
  "codex-shell-escalation",
  "codex-state",
+ "codex-swarm",
  "codex-terminal-detection",
  "codex-test-binary-support",
  "codex-thread-store",
@@ -4002,6 +4003,9 @@ dependencies = [
 [[package]]
 name = "codex-swarm"
 version = "0.0.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "codex-terminal-detection"

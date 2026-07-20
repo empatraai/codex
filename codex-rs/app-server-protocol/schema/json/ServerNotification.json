@@ -5609,6 +5609,116 @@
       ],
       "type": "string"
     },
+    "TurnWorkSwarmProgressNotification": {
+      "properties": {
+        "agentPath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cancelled": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "fallbackReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queued": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "running": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "skipped": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/TurnWorkSwarmProgressStatus"
+        },
+        "succeeded": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "taskId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "tokenBudget": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tokensUsed": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cancelled",
+        "failed",
+        "queued",
+        "runId",
+        "running",
+        "skipped",
+        "status",
+        "succeeded",
+        "threadId",
+        "tokensUsed",
+        "total",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "TurnWorkSwarmProgressStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
     "UserInput": {
       "oneOf": [
         {
@@ -6305,6 +6415,26 @@
         "params"
       ],
       "title": "Turn/plan/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/workSwarm/progress"
+          ],
+          "title": "Turn/workSwarm/progressNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/TurnWorkSwarmProgressNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Turn/workSwarm/progressNotification",
       "type": "object"
     },
     {

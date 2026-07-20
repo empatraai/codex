@@ -695,6 +695,12 @@ pub struct AgentsToml {
     pub default_subagent_model: Option<String>,
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub default_subagent_reasoning_effort: Option<ReasoningEffort>,
+    /// Economical, ordered model routes keyed by specialist agent type.
+    ///
+    /// A route is consulted only when a spawn call does not explicitly select a model. The first
+    /// available and compatible candidate is selected; later candidates are deterministic
+    /// fallbacks for unavailable models and bounded objective execution failures.
+    pub model_routing: Option<AgentModelRoutingToml>,
     /// Default maximum runtime in seconds for agent job workers.
     #[schemars(range(min = 1))]
     pub job_max_runtime_seconds: Option<u64>,
@@ -713,6 +719,41 @@ pub struct AgentsToml {
     /// ```
     #[serde(default, flatten)]
     pub roles: BTreeMap<String, AgentRoleToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentModelRoutingToml {
+    /// Enables specialist routing. Defaults to true when routes are configured.
+    pub enabled: Option<bool>,
+    /// Specialist routes keyed by the exact `agent_type` used by `spawn_agent`.
+    #[serde(default)]
+    pub routes: BTreeMap<String, AgentModelRouteToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentModelRouteToml {
+    /// Ordered candidates, cheapest/fastest suitable model first.
+    #[serde(default)]
+    pub candidates: Vec<AgentModelCandidateToml>,
+    /// Maximum objective-failure attempts for a task using this route.
+    #[schemars(range(min = 1))]
+    pub max_attempts: Option<u32>,
+    /// Optional per-attempt runtime bound.
+    #[schemars(range(min = 1))]
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AgentModelCandidateToml {
+    /// Model slug from the active provider model catalog.
+    pub model: String,
+    /// Optional reasoning effort for this candidate.
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Optional service tier requested for this candidate.
+    pub service_tier: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

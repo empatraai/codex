@@ -9,6 +9,7 @@ name = "codex_swarm"
 doctest = false
 
 [dependencies]
+serde = { workspace = true, features = ["derive"] }
 
 [lints]
 workspace = true

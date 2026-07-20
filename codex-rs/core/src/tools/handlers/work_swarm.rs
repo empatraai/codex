@@ -1,0 +1,1859 @@
+use super::*;
+use crate::agent::control::SpawnAgentOptions;
+use crate::agent::next_thread_spawn_depth;
+use crate::agent::status::is_final;
+use crate::function_tool::FunctionCallError;
+use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolPayload;
+use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::multi_agents_common::ResolvedSpawnAgentModelRoute;
+use crate::tools::handlers::multi_agents_common::SpawnAgentModelCandidate;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_model_route;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_role;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_runtime_overrides;
+use crate::tools::handlers::multi_agents_common::apply_spawn_agent_service_tier;
+use crate::tools::handlers::multi_agents_common::build_agent_spawn_config;
+use crate::tools::handlers::multi_agents_common::find_spawn_agent_model_name;
+use crate::tools::handlers::multi_agents_common::function_arguments;
+use crate::tools::handlers::multi_agents_common::thread_spawn_source;
+use crate::tools::handlers::multi_agents_common::tool_output_code_mode_result;
+use crate::tools::handlers::multi_agents_common::tool_output_json_text;
+use crate::tools::handlers::multi_agents_common::tool_output_response_item;
+use crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity;
+use crate::tools::handlers::work_swarm_spec::create_cancel_work_swarm_tool;
+use crate::tools::handlers::work_swarm_spec::create_get_work_swarm_status_tool;
+use crate::tools::handlers::work_swarm_spec::create_report_work_swarm_result_tool;
+use crate::tools::handlers::work_swarm_spec::create_start_work_swarm_tool;
+use crate::tools::registry::CoreToolRuntime;
+use crate::tools::registry::ToolExecutor;
+use chrono::DateTime;
+use chrono::Utc;
+use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::ThreadId;
+use codex_protocol::items::SubAgentActivityItem;
+use codex_protocol::models::ResponseInputItem;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentActivityKind;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::TurnWorkSwarmProgressEvent;
+use codex_protocol::protocol::TurnWorkSwarmProgressStatus;
+use codex_state::SwarmAttemptStatus;
+use codex_state::SwarmRun;
+use codex_state::SwarmRunStatus;
+use codex_state::SwarmTask;
+use codex_state::SwarmTaskAttemptDisposition;
+use codex_state::SwarmTaskStatus;
+use codex_swarm::CellId;
+use codex_swarm::ExecutionPolicy;
+use codex_swarm::ExecutionSpec;
+use codex_swarm::ExecutionSpecError;
+use codex_swarm::RunId;
+use codex_swarm::TaskId;
+use codex_swarm::TaskKind;
+use codex_swarm::TaskSpec;
+use codex_tools::ToolName;
+use codex_tools::ToolSpec;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::time::Duration;
+use tokio::time::sleep;
+use tracing::warn;
+use uuid::Uuid;
+
+const DEFAULT_LEASE_TTL_SECONDS: u64 = 60;
+const MIN_LEASE_TTL_SECONDS: u64 = 5;
+const MAX_LEASE_TTL_SECONDS: u64 = 3_600;
+const MAX_WORK_SWARM_TASKS: usize = 64;
+const MAX_TASK_ATTEMPTS: u32 = 8;
+const RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const WORK_SWARM_AGENT_NAME_PREFIX: &str = "work_swarm_";
+
+static ACTIVE_RUNNERS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[derive(Default)]
+pub(crate) struct StartWorkSwarmHandler;
+
+#[derive(Default)]
+pub(crate) struct GetWorkSwarmStatusHandler;
+
+#[derive(Default)]
+pub(crate) struct CancelWorkSwarmHandler;
+
+#[derive(Default)]
+pub(crate) struct ReportWorkSwarmResultHandler;
+
+macro_rules! impl_work_swarm_handler {
+    ($handler:ty, $tool_name:literal, $spec:path, $function:path) => {
+        impl ToolExecutor<ToolInvocation> for $handler {
+            fn tool_name(&self) -> ToolName {
+                ToolName::plain($tool_name)
+            }
+
+            fn spec(&self) -> ToolSpec {
+                $spec()
+            }
+
+            fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+                Box::pin(async move { $function(invocation).await.map(boxed_tool_output) })
+            }
+        }
+
+        impl CoreToolRuntime for $handler {
+            fn matches_kind(&self, payload: &ToolPayload) -> bool {
+                matches!(payload, ToolPayload::Function { .. })
+            }
+        }
+    };
+}
+
+impl_work_swarm_handler!(
+    StartWorkSwarmHandler,
+    "start_work_swarm",
+    create_start_work_swarm_tool,
+    handle_start_work_swarm
+);
+impl_work_swarm_handler!(
+    GetWorkSwarmStatusHandler,
+    "get_work_swarm_status",
+    create_get_work_swarm_status_tool,
+    handle_get_work_swarm_status
+);
+impl_work_swarm_handler!(
+    CancelWorkSwarmHandler,
+    "cancel_work_swarm",
+    create_cancel_work_swarm_tool,
+    handle_cancel_work_swarm
+);
+impl_work_swarm_handler!(
+    ReportWorkSwarmResultHandler,
+    "report_work_swarm_result",
+    create_report_work_swarm_result_tool,
+    handle_report_work_swarm_result
+);
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartWorkSwarmArgs {
+    title: Option<String>,
+    policy: WorkSwarmPolicyArgs,
+    tasks: Vec<WorkSwarmTaskArgs>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkSwarmPolicyArgs {
+    max_concurrency: usize,
+    token_budget: Option<u64>,
+    runtime_budget_seconds: Option<u64>,
+    lease_ttl_seconds: Option<u64>,
+    deadline_at: Option<String>,
+    fail_fast: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkSwarmTaskArgs {
+    id: String,
+    kind: String,
+    agent_type: String,
+    instructions: String,
+    dependencies: Option<Vec<String>>,
+    cell: Option<String>,
+    explicit_model: Option<String>,
+    explicit_reasoning: Option<ReasoningEffort>,
+    max_attempts: Option<u32>,
+    deadline_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelWorkSwarmArgs {
+    run_id: String,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkSwarmStatusArgs {
+    run_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportWorkSwarmResultArgs {
+    run_id: String,
+    task_id: String,
+    result_token: String,
+    result: Value,
+    status: String,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct StartWorkSwarmResult {
+    run_id: String,
+    accepted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CancelWorkSwarmResult {
+    run_id: String,
+    cancelled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkSwarmStatusResult {
+    run_id: String,
+    status: String,
+    total_tasks: usize,
+    pending_tasks: usize,
+    ready_tasks: usize,
+    running_tasks: usize,
+    completed_tasks: usize,
+    failed_tasks: usize,
+    retryable_tasks: usize,
+    escalated_tasks: usize,
+    cancelled_tasks: usize,
+    token_budget: Option<i64>,
+    token_usage: i64,
+    runtime_budget_seconds: Option<i64>,
+    runtime_usage_seconds: i64,
+    fallback_reason: Option<String>,
+    last_error: Option<String>,
+    tasks: Vec<WorkSwarmTaskStatusResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkSwarmTaskStatusResult {
+    task_id: String,
+    kind: String,
+    agent_type: Option<String>,
+    status: String,
+    attempt_count: i64,
+    max_attempts: i64,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+    fallback_reason: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportWorkSwarmResult {
+    accepted: bool,
+    disposition: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportDisposition {
+    Succeeded,
+    Failed,
+    Retryable,
+    Escalated,
+}
+
+#[derive(Debug)]
+enum ClaimedTaskFailure {
+    Objective(String),
+    Retryable(String),
+    Fatal(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ClaimedTaskFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl ReportDisposition {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Retryable => "retryable",
+            Self::Escalated => "escalated",
+        }
+    }
+}
+
+async fn handle_start_work_swarm(
+    invocation: ToolInvocation,
+) -> Result<StartWorkSwarmResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    ensure_orchestrator_source(&turn)?;
+    let args: StartWorkSwarmArgs = parse_arguments(&function_arguments(payload)?)?;
+    validate_request_limits(&args, &turn)?;
+    let db = required_state_db(&session)?;
+    let run_id = Uuid::new_v4().to_string();
+    let execution_spec = build_execution_spec(&args, &turn, run_id.as_str())?;
+    execution_spec.validate().map_err(execution_spec_error)?;
+
+    let run_params = codex_state::SwarmRunCreateParams {
+        id: run_id.clone(),
+        thread_id: session.thread_id.to_string(),
+        title: args
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string),
+        spec_json: Some(serde_json::to_value(&execution_spec).map_err(json_error)?),
+        model_candidate_json: None,
+        fallback_reason: None,
+        max_concurrency: execution_spec.policy.max_concurrency as i64,
+        token_budget: execution_spec
+            .policy
+            .token_budget
+            .map(saturating_u64_to_i64),
+        runtime_budget_seconds: execution_spec
+            .policy
+            .max_runtime
+            .map(|duration| saturating_u64_to_i64(duration.as_secs())),
+        fail_fast: execution_spec.policy.fail_fast,
+        cancel_policy: Some("propagate".to_string()),
+        deadline_at: execution_spec.policy.deadline.map(Into::into),
+    };
+    let tasks = build_task_params(run_id.as_str(), &session, &execution_spec);
+    let run = db
+        .create_runnable_swarm_run(&run_params, &tasks)
+        .await
+        .map_err(runtime_error)?;
+
+    emit_work_swarm_progress(
+        &session,
+        &turn,
+        run.id.as_str(),
+        TurnWorkSwarmProgressStatus::Pending,
+        None,
+        None,
+    )
+    .await;
+    spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
+
+    Ok(StartWorkSwarmResult {
+        run_id: run.id,
+        accepted: true,
+    })
+}
+
+async fn handle_get_work_swarm_status(
+    invocation: ToolInvocation,
+) -> Result<WorkSwarmStatusResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    ensure_orchestrator_source(&turn)?;
+    let args: WorkSwarmStatusArgs = parse_arguments(&function_arguments(payload)?)?;
+    let db = required_state_db(&session)?;
+    let run = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+    if matches!(
+        run.status,
+        SwarmRunStatus::Pending | SwarmRunStatus::Running
+    ) {
+        spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
+    }
+    let progress = db
+        .get_swarm_run_progress(args.run_id.as_str())
+        .await
+        .map_err(runtime_error)?;
+    let (_, tasks, _, _, _) = db
+        .load_swarm_recovery_data(args.run_id.as_str())
+        .await
+        .map_err(runtime_error)?;
+    let task_statuses = tasks
+        .into_iter()
+        .map(|task| WorkSwarmTaskStatusResult {
+            task_id: local_task_id(run.id.as_str(), task.id.as_str()).to_string(),
+            kind: task.task_kind,
+            agent_type: task.agent_type,
+            status: task.status.as_str().to_string(),
+            attempt_count: task.attempt_count,
+            max_attempts: task.max_attempts,
+            model: task
+                .model_candidate_json
+                .as_ref()
+                .and_then(|candidate| candidate.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            reasoning_effort: task
+                .model_candidate_json
+                .as_ref()
+                .and_then(|candidate| candidate.get("reasoning_effort"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            service_tier: task
+                .model_candidate_json
+                .as_ref()
+                .and_then(|candidate| candidate.get("service_tier"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            fallback_reason: task.fallback_reason,
+            last_error: task.last_error,
+        })
+        .collect();
+    Ok(WorkSwarmStatusResult {
+        run_id: run.id,
+        status: run.status.as_str().to_string(),
+        total_tasks: progress.total_tasks,
+        pending_tasks: progress.pending_tasks,
+        ready_tasks: progress.ready_tasks,
+        running_tasks: progress.running_tasks,
+        completed_tasks: progress.completed_tasks,
+        failed_tasks: progress.failed_tasks,
+        retryable_tasks: progress.retryable_tasks,
+        escalated_tasks: progress.escalated_tasks,
+        cancelled_tasks: progress.cancelled_tasks,
+        token_budget: run.token_budget,
+        token_usage: run.token_usage,
+        runtime_budget_seconds: run.runtime_budget_seconds,
+        runtime_usage_seconds: run.runtime_usage_seconds,
+        fallback_reason: run.fallback_reason,
+        last_error: run.last_error,
+        tasks: task_statuses,
+    })
+}
+
+async fn handle_cancel_work_swarm(
+    invocation: ToolInvocation,
+) -> Result<CancelWorkSwarmResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    ensure_orchestrator_source(&turn)?;
+    let args: CancelWorkSwarmArgs = parse_arguments(&function_arguments(payload)?)?;
+    let db = required_state_db(&session)?;
+    let _ = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+    let reason = args
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("cancelled by orchestrator");
+    let cancellation = db
+        .cancel_swarm_run(args.run_id.as_str(), reason)
+        .await
+        .map_err(runtime_error)?;
+    if cancellation.cancelled {
+        shutdown_work_swarm_worker_threads(&session, cancellation.worker_thread_ids).await;
+        emit_work_swarm_progress(
+            &session,
+            &turn,
+            args.run_id.as_str(),
+            TurnWorkSwarmProgressStatus::Cancelled,
+            None,
+            Some(reason),
+        )
+        .await;
+    }
+    Ok(CancelWorkSwarmResult {
+        run_id: args.run_id,
+        cancelled: cancellation.cancelled,
+    })
+}
+
+async fn handle_report_work_swarm_result(
+    invocation: ToolInvocation,
+) -> Result<ReportWorkSwarmResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    let args: ReportWorkSwarmResultArgs = parse_arguments(&function_arguments(payload)?)?;
+    ensure_worker_source(&turn)?;
+    if !args.result.is_object() {
+        return Err(FunctionCallError::RespondToModel(
+            "work swarm result must be a JSON object".to_string(),
+        ));
+    }
+    let requested_disposition = parse_report_disposition(&args)?;
+    let db = required_state_db(&session)?;
+    let task = db
+        .get_swarm_task(args.task_id.as_str())
+        .await
+        .map_err(runtime_error)?
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!("work swarm task {} not found", args.task_id))
+        })?;
+    authenticate_worker_report(&task, &session, &args)?;
+
+    let attempt_id = attempt_id(&task);
+    let tokens_used = session
+        .services
+        .agent_control
+        .child_token_usage(session.thread_id)
+        .await;
+    let disposition = if matches!(
+        requested_disposition,
+        ReportDisposition::Retryable | ReportDisposition::Escalated
+    ) && task.attempt_count >= task.max_attempts
+    {
+        ReportDisposition::Failed
+    } else {
+        requested_disposition
+    };
+    let state_disposition = match disposition {
+        ReportDisposition::Succeeded => SwarmTaskAttemptDisposition::Succeeded,
+        ReportDisposition::Failed => SwarmTaskAttemptDisposition::Failed,
+        ReportDisposition::Retryable => SwarmTaskAttemptDisposition::Retryable,
+        ReportDisposition::Escalated => SwarmTaskAttemptDisposition::Escalated,
+    };
+    let transition_error = match disposition {
+        ReportDisposition::Failed => Some(
+            args.error
+                .as_deref()
+                .unwrap_or("worker reported objective failure"),
+        ),
+        ReportDisposition::Succeeded => None,
+        ReportDisposition::Retryable | ReportDisposition::Escalated => args.error.as_deref(),
+    };
+    let transitioned = db
+        .finalize_swarm_worker_report(
+            attempt_id.as_str(),
+            task.id.as_str(),
+            state_disposition,
+            tokens_used,
+            0,
+            Some(&args.result),
+            transition_error,
+        )
+        .await
+        .map_err(runtime_error)?;
+    if !transitioned {
+        return Err(FunctionCallError::RespondToModel(
+            "work swarm attempt or task is no longer active".to_string(),
+        ));
+    }
+
+    emit_work_swarm_progress(
+        &session,
+        &turn,
+        args.run_id.as_str(),
+        match disposition {
+            ReportDisposition::Succeeded
+            | ReportDisposition::Retryable
+            | ReportDisposition::Escalated => TurnWorkSwarmProgressStatus::Running,
+            ReportDisposition::Failed => TurnWorkSwarmProgressStatus::Failed,
+        },
+        Some(task.id.as_str()),
+        transition_error,
+    )
+    .await;
+
+    let control = session.services.agent_control.clone();
+    let child_thread_id = session.thread_id;
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(100)).await;
+        let _ = control.shutdown_live_agent(child_thread_id).await;
+    });
+
+    Ok(ReportWorkSwarmResult {
+        accepted: true,
+        disposition: disposition.as_str().to_string(),
+    })
+}
+
+fn ensure_orchestrator_source(turn: &TurnContext) -> Result<(), FunctionCallError> {
+    if matches!(&turn.session_source, SessionSource::SubAgent(_)) {
+        return Err(FunctionCallError::RespondToModel(
+            "work swarm workers cannot create, inspect, or cancel swarm runs".to_string(),
+        ));
+    }
+    if turn
+        .session_source
+        .get_agent_path()
+        .is_some_and(|path| !path.is_root())
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "only the root Work orchestrator can manage Work Swarm runs".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_worker_source(turn: &TurnContext) -> Result<(), FunctionCallError> {
+    if is_work_swarm_worker_source(&turn.session_source) {
+        return Ok(());
+    }
+    Err(FunctionCallError::RespondToModel(
+        "report_work_swarm_result is only available to the assigned Work Swarm worker".to_string(),
+    ))
+}
+
+pub(crate) fn is_work_swarm_worker_source(source: &SessionSource) -> bool {
+    matches!(
+        source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_path: Some(agent_path),
+            ..
+        }) if agent_path.name().starts_with(WORK_SWARM_AGENT_NAME_PREFIX)
+    )
+}
+
+fn authenticate_worker_report(
+    task: &SwarmTask,
+    session: &Session,
+    args: &ReportWorkSwarmResultArgs,
+) -> Result<(), FunctionCallError> {
+    let current_thread_id = session.thread_id.to_string();
+    if task.run_id != args.run_id
+        || task.status != SwarmTaskStatus::Running
+        || task
+            .lease_until
+            .is_none_or(|lease_until| lease_until <= Utc::now())
+        || task.assigned_thread_id.as_deref() != Some(current_thread_id.as_str())
+        || task.result_token != args.result_token
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "work swarm result token, task lease, or assigned worker does not match".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_report_disposition(
+    args: &ReportWorkSwarmResultArgs,
+) -> Result<ReportDisposition, FunctionCallError> {
+    match args.status.trim() {
+        "succeeded" => Ok(ReportDisposition::Succeeded),
+        "failed" => Ok(ReportDisposition::Failed),
+        "retryable" => Ok(ReportDisposition::Retryable),
+        "escalated" => Ok(ReportDisposition::Escalated),
+        other => Err(FunctionCallError::RespondToModel(format!(
+            "unknown work swarm result status: {other}"
+        ))),
+    }
+}
+
+fn validate_request_limits(
+    args: &StartWorkSwarmArgs,
+    turn: &TurnContext,
+) -> Result<(), FunctionCallError> {
+    if args.tasks.len() > MAX_WORK_SWARM_TASKS {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "work swarm supports at most {MAX_WORK_SWARM_TASKS} tasks per run"
+        )));
+    }
+    if let Some(max_threads) = turn.config.agent_max_threads
+        && args.policy.max_concurrency > max_threads
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "max_concurrency {} exceeds configured agent thread limit {max_threads}",
+            args.policy.max_concurrency
+        )));
+    }
+    if let Some(lease_ttl) = args.policy.lease_ttl_seconds
+        && !(MIN_LEASE_TTL_SECONDS..=MAX_LEASE_TTL_SECONDS).contains(&lease_ttl)
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "lease_ttl_seconds must be between {MIN_LEASE_TTL_SECONDS} and {MAX_LEASE_TTL_SECONDS}"
+        )));
+    }
+    for task in &args.tasks {
+        if task.id.len() > 96 || task.agent_type.len() > 64 {
+            return Err(FunctionCallError::RespondToModel(
+                "work swarm task id or agent_type is too long".to_string(),
+            ));
+        }
+        if task.id.contains(':') {
+            return Err(FunctionCallError::RespondToModel(
+                "work swarm task ids must not contain a colon".to_string(),
+            ));
+        }
+        if task
+            .max_attempts
+            .is_some_and(|value| value > MAX_TASK_ATTEMPTS)
+        {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "task {} exceeds the maximum of {MAX_TASK_ATTEMPTS} attempts",
+                task.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_execution_spec(
+    args: &StartWorkSwarmArgs,
+    turn: &TurnContext,
+    run_id: &str,
+) -> Result<ExecutionSpec, FunctionCallError> {
+    let policy = ExecutionPolicy {
+        max_concurrency: args.policy.max_concurrency,
+        token_budget: args.policy.token_budget,
+        max_runtime: args.policy.runtime_budget_seconds.map(Duration::from_secs),
+        deadline: parse_datetime(args.policy.deadline_at.as_deref())?.map(Into::into),
+        fail_fast: args.policy.fail_fast.unwrap_or(true),
+        lease_ttl: Duration::from_secs(
+            args.policy
+                .lease_ttl_seconds
+                .unwrap_or(DEFAULT_LEASE_TTL_SECONDS),
+        ),
+        default_max_attempts: None,
+    };
+    let tasks = args
+        .tasks
+        .iter()
+        .map(|task| {
+            let routing = &turn.config.agent_model_routing;
+            let route = routing
+                .enabled
+                .unwrap_or(!routing.routes.is_empty())
+                .then(|| routing.routes.get(task.agent_type.trim()))
+                .flatten();
+            let route_attempts = route
+                .and_then(|route| route.max_attempts)
+                .or_else(|| route.map(|route| route.candidates.len().max(1) as u32))
+                .unwrap_or(1);
+            let max_attempts = task
+                .max_attempts
+                .unwrap_or(if task.explicit_model.is_some() {
+                    1
+                } else {
+                    route_attempts
+                })
+                .min(MAX_TASK_ATTEMPTS);
+            Ok(TaskSpec {
+                id: TaskId(task.id.trim().to_string()),
+                kind: parse_task_kind(task.kind.as_str())?,
+                agent_type: task.agent_type.trim().to_string(),
+                instructions: task.instructions.trim().to_string(),
+                dependencies: task
+                    .dependencies
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|id| TaskId(id.trim().to_string()))
+                    .collect(),
+                cell: task
+                    .cell
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|cell| !cell.is_empty())
+                    .map(|cell| CellId(cell.to_string())),
+                explicit_model: task
+                    .explicit_model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .map(str::to_string),
+                explicit_reasoning: task.explicit_reasoning.as_ref().map(ToString::to_string),
+                max_attempts,
+                deadline: parse_datetime(task.deadline_at.as_deref())?.map(Into::into),
+            })
+        })
+        .collect::<Result<Vec<_>, FunctionCallError>>()?;
+    Ok(ExecutionSpec {
+        run_id: RunId(run_id.to_string()),
+        policy,
+        tasks,
+    })
+}
+
+fn build_task_params(
+    run_id: &str,
+    session: &Session,
+    execution_spec: &ExecutionSpec,
+) -> Vec<codex_state::SwarmTaskCreateParams> {
+    execution_spec
+        .tasks
+        .iter()
+        .enumerate()
+        .map(|(order_index, task)| codex_state::SwarmTaskCreateParams {
+            id: stored_task_id(run_id, task.id.0.as_str()),
+            run_id: run_id.to_string(),
+            thread_id: session.thread_id.to_string(),
+            assigned_thread_id: None,
+            order_index: order_index as i64,
+            depends_on_task_ids: task
+                .dependencies
+                .iter()
+                .map(|dependency| stored_task_id(run_id, dependency.0.as_str()))
+                .collect(),
+            task_kind: task_kind_name(task.kind).to_string(),
+            agent_type: Some(task.agent_type.clone()),
+            instructions: Some(task.instructions.clone()),
+            result_token: Uuid::new_v4().to_string(),
+            model_candidate_json: None,
+            model_route_json: None,
+            candidate_index: None,
+            fallback_reason: None,
+            max_attempts: i64::from(task.max_attempts),
+            deadline_at: task.deadline.map(Into::into),
+        })
+        .collect()
+}
+
+fn stored_task_id(run_id: &str, local_task_id: &str) -> String {
+    format!("{run_id}:{local_task_id}")
+}
+
+fn local_task_id<'a>(run_id: &str, stored_task_id: &'a str) -> &'a str {
+    stored_task_id
+        .strip_prefix(format!("{run_id}:").as_str())
+        .unwrap_or(stored_task_id)
+}
+
+fn task_kind_name(kind: TaskKind) -> &'static str {
+    match kind {
+        TaskKind::Worker => "worker",
+        TaskKind::Reducer => "reducer",
+        TaskKind::Reviewer => "reviewer",
+    }
+}
+
+fn parse_task_kind(kind: &str) -> Result<TaskKind, FunctionCallError> {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "worker" => Ok(TaskKind::Worker),
+        "reducer" => Ok(TaskKind::Reducer),
+        "reviewer" => Ok(TaskKind::Reviewer),
+        other => Err(FunctionCallError::RespondToModel(format!(
+            "unknown work swarm task kind: {other}"
+        ))),
+    }
+}
+
+fn parse_datetime(value: Option<&str>) -> Result<Option<DateTime<Utc>>, FunctionCallError> {
+    value
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|datetime| datetime.with_timezone(&Utc))
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!("invalid RFC3339 timestamp: {err}"))
+                })
+        })
+        .transpose()
+}
+
+fn spawn_work_swarm_runner(session: Arc<Session>, turn: Arc<TurnContext>, run_id: String) {
+    let inserted = ACTIVE_RUNNERS
+        .lock()
+        .map(|mut runners| runners.insert(run_id.clone()))
+        .unwrap_or(false);
+    if !inserted {
+        return;
+    }
+    tokio::spawn(async move {
+        let result = run_work_swarm(Arc::clone(&session), Arc::clone(&turn), run_id.clone()).await;
+        if let Err(err) = result {
+            let error = err.to_string();
+            warn!("work swarm run {run_id} failed: {err:#}");
+            if let Some(db) = session.state_db() {
+                let _ = db
+                    .mark_swarm_run_failed(run_id.as_str(), error.as_str())
+                    .await;
+            }
+            shutdown_running_work_swarm_children(&session, run_id.as_str()).await;
+            emit_work_swarm_progress(
+                &session,
+                &turn,
+                run_id.as_str(),
+                TurnWorkSwarmProgressStatus::Failed,
+                None,
+                Some(error.as_str()),
+            )
+            .await;
+        }
+        if let Ok(mut runners) = ACTIVE_RUNNERS.lock() {
+            runners.remove(run_id.as_str());
+        }
+    });
+}
+
+/// Restarts durable Work Swarm runs when an orchestrator session resumes after a process crash.
+/// The in-memory registry makes this safe to call at every step boundary.
+pub(crate) async fn resume_active_work_swarms(session: &Arc<Session>, turn: &Arc<TurnContext>) {
+    if ensure_orchestrator_source(turn).is_err() {
+        return;
+    }
+    let Some(db) = session.state_db() else {
+        return;
+    };
+    let thread_id = session.thread_id.to_string();
+    match db.list_active_swarm_runs(thread_id.as_str()).await {
+        Ok(runs) => {
+            for run in runs {
+                spawn_work_swarm_runner(Arc::clone(session), Arc::clone(turn), run.id);
+            }
+        }
+        Err(err) => warn!("failed to recover active Work Swarm runs: {err:#}"),
+    }
+}
+
+async fn run_work_swarm(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    run_id: String,
+) -> anyhow::Result<()> {
+    let db = session
+        .state_db()
+        .ok_or_else(|| anyhow::anyhow!("state db unavailable"))?;
+    let execution_spec = load_execution_spec(&db, run_id.as_str()).await?;
+    let lease_owner = format!("work_swarm:{run_id}");
+    let lease_seconds = execution_spec.policy.lease_ttl.as_secs().max(1) as i64;
+
+    loop {
+        let Some(run) = db.get_swarm_run(run_id.as_str()).await? else {
+            return Ok(());
+        };
+        if run.status == SwarmRunStatus::Cancelled {
+            shutdown_running_work_swarm_children(&session, run_id.as_str()).await;
+            return Ok(());
+        }
+        if matches!(
+            run.status,
+            SwarmRunStatus::Completed | SwarmRunStatus::Failed
+        ) {
+            return Ok(());
+        }
+
+        if let Some(reason) = run_limit_failure(&session, &db, &run).await? {
+            fail_run(&session, &turn, &db, run_id.as_str(), reason.as_str()).await?;
+            return Ok(());
+        }
+
+        reconcile_running_tasks(
+            &session,
+            &turn,
+            &db,
+            &run,
+            lease_owner.as_str(),
+            lease_seconds,
+        )
+        .await?;
+
+        let progress = db.get_swarm_run_progress(run_id.as_str()).await?;
+        if progress.failed_tasks > 0 && run.fail_fast {
+            fail_run(
+                &session,
+                &turn,
+                &db,
+                run_id.as_str(),
+                "a Work Swarm task failed and fail_fast is enabled",
+            )
+            .await?;
+            return Ok(());
+        }
+        if progress.completed_tasks == progress.total_tasks && progress.total_tasks > 0 {
+            let result = collect_completed_task_results(&db, run_id.as_str()).await?;
+            db.mark_swarm_run_completed(run_id.as_str(), Some(&result))
+                .await?;
+            emit_work_swarm_progress(
+                &session,
+                &turn,
+                run_id.as_str(),
+                TurnWorkSwarmProgressStatus::Succeeded,
+                None,
+                None,
+            )
+            .await;
+            return Ok(());
+        }
+
+        let mut spawned_any = false;
+        let mut running = progress.running_tasks;
+        let concurrency_limit = usize::try_from(run.max_concurrency.max(1)).unwrap_or(1);
+        while running < concurrency_limit {
+            let Some(task) = db
+                .claim_ready_swarm_task(run_id.as_str(), lease_owner.as_str(), lease_seconds)
+                .await?
+            else {
+                break;
+            };
+            spawned_any = true;
+            match spawn_claimed_task(
+                &session,
+                &turn,
+                &db,
+                &run,
+                &execution_spec,
+                &task,
+                lease_owner.as_str(),
+                lease_seconds,
+            )
+            .await
+            {
+                Ok(()) => {
+                    running += 1;
+                }
+                Err(ClaimedTaskFailure::Objective(error)) => {
+                    handle_objective_attempt_failure(&session, &db, &task, error.as_str()).await?;
+                    emit_work_swarm_progress(
+                        &session,
+                        &turn,
+                        run_id.as_str(),
+                        TurnWorkSwarmProgressStatus::Running,
+                        Some(task.id.as_str()),
+                        Some(error.as_str()),
+                    )
+                    .await;
+                }
+                Err(ClaimedTaskFailure::Retryable(error)) => {
+                    handle_retryable_attempt_failure(&session, &db, &task, error.as_str()).await?;
+                    emit_work_swarm_progress(
+                        &session,
+                        &turn,
+                        run_id.as_str(),
+                        TurnWorkSwarmProgressStatus::Running,
+                        Some(task.id.as_str()),
+                        Some(error.as_str()),
+                    )
+                    .await;
+                }
+                Err(ClaimedTaskFailure::Fatal(error)) => return Err(error),
+            }
+        }
+
+        let progress = db.get_swarm_run_progress(run_id.as_str()).await?;
+        if progress.failed_tasks > 0 && progress.running_tasks == 0 && !spawned_any {
+            fail_run(
+                &session,
+                &turn,
+                &db,
+                run_id.as_str(),
+                "Work Swarm cannot make further progress because one or more tasks failed",
+            )
+            .await?;
+            return Ok(());
+        }
+        emit_work_swarm_progress(
+            &session,
+            &turn,
+            run_id.as_str(),
+            TurnWorkSwarmProgressStatus::Running,
+            None,
+            None,
+        )
+        .await;
+        sleep(RUNNER_POLL_INTERVAL).await;
+    }
+}
+
+async fn collect_completed_task_results(
+    db: &crate::StateDbHandle,
+    run_id: &str,
+) -> anyhow::Result<Value> {
+    let (_, tasks, _, _, _) = db.load_swarm_recovery_data(run_id).await?;
+    let results = tasks
+        .into_iter()
+        .map(|task| {
+            (
+                local_task_id(run_id, task.id.as_str()).to_string(),
+                task.result_json.unwrap_or(Value::Null),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(json!({ "tasks": results }))
+}
+
+async fn spawn_claimed_task(
+    session: &Session,
+    turn: &TurnContext,
+    db: &crate::StateDbHandle,
+    run: &SwarmRun,
+    execution_spec: &ExecutionSpec,
+    task: &SwarmTask,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> Result<(), ClaimedTaskFailure> {
+    let local_id = local_task_id(run.id.as_str(), task.id.as_str());
+    let task_spec = execution_spec
+        .tasks
+        .iter()
+        .find(|candidate| candidate.id.0 == local_id)
+        .ok_or_else(|| {
+            ClaimedTaskFailure::Fatal(anyhow::anyhow!(
+                "task {local_id} is missing from persisted execution spec"
+            ))
+        })?;
+    let dependency_results = load_dependency_results(db, task).await?;
+    let mut child_config = build_agent_spawn_config(&session.get_base_instructions().await, turn)
+        .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?;
+    let route = if let Some(persisted_route) = task.model_route_json.clone() {
+        serde_json::from_value::<ResolvedSpawnAgentModelRoute>(persisted_route).map_err(|err| {
+            ClaimedTaskFailure::Fatal(anyhow::anyhow!(
+                "persisted model route for task {} is invalid: {err}",
+                task.id
+            ))
+        })?
+    } else {
+        apply_spawn_agent_model_route(
+            session,
+            turn,
+            &mut child_config,
+            task.agent_type.as_deref(),
+            task_spec.explicit_model.as_deref(),
+            task_spec
+                .explicit_reasoning
+                .as_deref()
+                .and_then(|value| value.parse::<ReasoningEffort>().ok()),
+            None,
+        )
+        .await
+        .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?
+    };
+    let selected_index = usize::try_from(task.candidate_index.unwrap_or(0).max(0))
+        .unwrap_or(0)
+        .min(route.candidates.len().saturating_sub(1));
+    let selected = route
+        .candidates
+        .get(selected_index)
+        .cloned()
+        .ok_or_else(|| {
+            ClaimedTaskFailure::Fatal(anyhow::anyhow!(
+                "persisted model route contains no compatible candidates"
+            ))
+        })?;
+    apply_candidate(&mut child_config, &selected);
+    apply_spawn_agent_role(session, &mut child_config, task.agent_type.as_deref())
+        .await
+        .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?;
+    let selected_model = child_config.model.as_deref().ok_or_else(|| {
+        ClaimedTaskFailure::Objective(
+            "the resolved Work Swarm candidate does not select a model".to_string(),
+        )
+    })?;
+    let available_models = session
+        .services
+        .models_manager
+        .list_models(RefreshStrategy::Offline)
+        .await;
+    find_spawn_agent_model_name(&available_models, selected_model, turn.multi_agent_version)
+        .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?;
+    apply_spawn_agent_service_tier(
+        session,
+        &mut child_config,
+        turn.config.service_tier.as_deref(),
+        selected.service_tier.as_deref(),
+    )
+    .await
+    .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?;
+    apply_spawn_agent_runtime_overrides(&mut child_config, turn)
+        .map_err(|err| ClaimedTaskFailure::Objective(format!("{err:?}")))?;
+
+    let fallback_reason = if selected_index > 0 {
+        Some(
+            task.fallback_reason
+                .as_deref()
+                .unwrap_or("previous objective failure"),
+        )
+    } else {
+        route.fallback_reason.as_deref()
+    };
+    let route_json = route_to_json(&route)?;
+    let selected_json = json!({
+        "model": child_config.model,
+        "reasoning_effort": child_config.model_reasoning_effort.as_ref().map(ToString::to_string),
+        "service_tier": child_config.service_tier,
+    });
+    if !db
+        .update_swarm_task_routing(
+            task.id.as_str(),
+            lease_owner,
+            &selected_json,
+            &route_json,
+            selected_index as i64,
+            fallback_reason,
+        )
+        .await?
+    {
+        return Err(ClaimedTaskFailure::Retryable(
+            "task lease was lost while selecting a model".to_string(),
+        ));
+    }
+
+    let attempt_id = attempt_id(task);
+    let pending_thread_id = format!("pending:{}", task.id);
+    db.record_swarm_attempt_start(
+        attempt_id.as_str(),
+        run.id.as_str(),
+        task.id.as_str(),
+        pending_thread_id.as_str(),
+        Some(lease_owner),
+        Some(lease_seconds),
+        Some(&selected_json),
+        fallback_reason,
+    )
+    .await?;
+
+    let worker_prompt = build_worker_prompt(run, task, task_spec, &dependency_results)?;
+    let spawn_source = thread_spawn_source(
+        session.thread_id,
+        &turn.session_source,
+        next_thread_spawn_depth(&turn.session_source),
+        task.agent_type.as_deref(),
+        Some(format!(
+            "{WORK_SWARM_AGENT_NAME_PREFIX}{}",
+            Uuid::now_v7().simple()
+        )),
+    )
+    .map_err(|err| ClaimedTaskFailure::Fatal(anyhow::anyhow!("{err:?}")))?;
+    let worker_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
+        ClaimedTaskFailure::Fatal(anyhow::anyhow!(
+            "Work Swarm worker is missing a canonical agent path"
+        ))
+    })?;
+    let spawned = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            child_config,
+            vec![codex_protocol::user_input::UserInput::Text {
+                text: worker_prompt,
+                text_elements: Vec::new(),
+            }],
+            Some(spawn_source),
+            SpawnAgentOptions {
+                parent_thread_id: Some(session.thread_id),
+                environments: Some(turn.environments.to_selections()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|err| ClaimedTaskFailure::Retryable(err.to_string()))?;
+    let thread_id = spawned.thread_id;
+    if !db
+        .bind_swarm_attempt_thread(
+            attempt_id.as_str(),
+            lease_owner,
+            thread_id.to_string().as_str(),
+        )
+        .await?
+        || !db
+            .bind_swarm_task_thread(
+                task.id.as_str(),
+                lease_owner,
+                thread_id.to_string().as_str(),
+            )
+            .await?
+    {
+        let _ = session
+            .services
+            .agent_control
+            .shutdown_live_agent(thread_id)
+            .await;
+        return Err(ClaimedTaskFailure::Retryable(
+            "task lease was lost while binding its worker".to_string(),
+        ));
+    }
+
+    emit_sub_agent_activity(
+        session,
+        turn,
+        SubAgentActivityItem {
+            id: format!("work_swarm:{}:{}", run.id, task.id),
+            agent_thread_id: thread_id,
+            agent_path: worker_agent_path,
+            kind: SubAgentActivityKind::Started,
+        },
+    )
+    .await;
+    emit_work_swarm_progress(
+        session,
+        turn,
+        run.id.as_str(),
+        TurnWorkSwarmProgressStatus::Running,
+        Some(task.id.as_str()),
+        None,
+    )
+    .await;
+    Ok(())
+}
+
+fn apply_candidate(config: &mut crate::config::Config, candidate: &SpawnAgentModelCandidate) {
+    config.model = Some(candidate.model.clone());
+    config.model_reasoning_effort = candidate.reasoning_effort.clone();
+    config.service_tier = candidate.service_tier.clone();
+}
+
+fn route_to_json(route: &ResolvedSpawnAgentModelRoute) -> anyhow::Result<Value> {
+    Ok(serde_json::to_value(route)?)
+}
+
+async fn load_dependency_results(
+    db: &crate::StateDbHandle,
+    task: &SwarmTask,
+) -> anyhow::Result<BTreeMap<String, Value>> {
+    let mut results = BTreeMap::new();
+    for dependency_id in &task.depends_on_task_ids {
+        let dependency = db
+            .get_swarm_task(dependency_id.as_str())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("dependency {dependency_id} is missing"))?;
+        if dependency.status != SwarmTaskStatus::Completed {
+            return Err(anyhow::anyhow!(
+                "dependency {dependency_id} is not completed"
+            ));
+        }
+        results.insert(
+            local_task_id(task.run_id.as_str(), dependency.id.as_str()).to_string(),
+            dependency.result_json.unwrap_or(Value::Null),
+        );
+    }
+    Ok(results)
+}
+
+fn build_worker_prompt(
+    run: &SwarmRun,
+    task: &SwarmTask,
+    task_spec: &TaskSpec,
+    dependency_results: &BTreeMap<String, Value>,
+) -> anyhow::Result<String> {
+    let dependencies = serde_json::to_string_pretty(dependency_results)?;
+    Ok(format!(
+        "You are a narrow specialist in an Empatra Work Swarm. The root orchestrator has already planned the work. Follow this packet exactly.\n\
+Run ID: {}\n\
+Task ID: {}\n\
+Task kind: {}\n\
+Agent type: {}\n\
+Run title: {}\n\
+\n\
+Dependency results (authoritative JSON):\n{}\n\
+\n\
+Task instructions:\n{}\n\
+\n\
+Completion contract:\n\
+- Call report_work_swarm_result exactly once.\n\
+- Pass run_id {}, task_id {}, and result_token {} unchanged.\n\
+- Return a JSON object in result.\n\
+- Use status succeeded for a valid result.\n\
+- Use retryable only for a concrete transient execution failure.\n\
+- Use escalated only for an objective model/provider/timeout/schema failure that warrants the next configured model.\n\
+- Do not use confidence or task difficulty as an escalation signal.\n\
+- Stop after reporting.",
+        run.id,
+        task.id,
+        task.task_kind,
+        task.agent_type.as_deref().unwrap_or("worker"),
+        run.title.as_deref().unwrap_or_default(),
+        dependencies,
+        task_spec.instructions,
+        run.id,
+        task.id,
+        task.result_token,
+    ))
+}
+
+async fn reconcile_running_tasks(
+    session: &Session,
+    turn: &TurnContext,
+    db: &crate::StateDbHandle,
+    run: &SwarmRun,
+    lease_owner: &str,
+    lease_seconds: i64,
+) -> anyhow::Result<()> {
+    let (_, tasks, _, _, _) = db.load_swarm_recovery_data(run.id.as_str()).await?;
+    for task in tasks
+        .into_iter()
+        .filter(|task| task.status == SwarmTaskStatus::Running)
+    {
+        let now = Utc::now();
+        if task.deadline_at.is_some_and(|deadline| deadline <= now) {
+            terminate_active_attempt(session, db, &task, "task deadline exceeded", true).await?;
+            emit_work_swarm_progress(
+                session,
+                turn,
+                run.id.as_str(),
+                TurnWorkSwarmProgressStatus::Running,
+                Some(task.id.as_str()),
+                Some("task deadline exceeded"),
+            )
+            .await;
+            continue;
+        }
+        let attempt = db.get_swarm_attempt(attempt_id(&task).as_str()).await?;
+        if let (Some(timeout), Some(started_at)) = (
+            route_timeout_seconds(&task),
+            attempt.as_ref().and_then(|attempt| attempt.started_at),
+        ) && now.signed_duration_since(started_at).num_seconds().max(0) as u64 >= timeout
+        {
+            terminate_active_attempt(session, db, &task, "worker attempt timed out", true).await?;
+            emit_work_swarm_progress(
+                session,
+                turn,
+                run.id.as_str(),
+                TurnWorkSwarmProgressStatus::Running,
+                Some(task.id.as_str()),
+                Some("worker attempt timed out"),
+            )
+            .await;
+            continue;
+        }
+
+        let Some(thread_id) = task
+            .assigned_thread_id
+            .as_deref()
+            .and_then(|value| ThreadId::from_string(value).ok())
+        else {
+            continue;
+        };
+        let status = session.services.agent_control.get_status(thread_id).await;
+        if is_final(&status) {
+            let error = format!("worker ended without a result report: {status:?}");
+            terminate_active_attempt(session, db, &task, error.as_str(), true).await?;
+        } else {
+            db.renew_swarm_task_lease(task.id.as_str(), lease_owner, lease_seconds)
+                .await?;
+        }
+    }
+    db.expire_swarm_leases().await?;
+    Ok(())
+}
+
+fn route_timeout_seconds(task: &SwarmTask) -> Option<u64> {
+    task.model_route_json
+        .as_ref()
+        .and_then(|route| route.get("timeout_seconds"))
+        .and_then(Value::as_u64)
+}
+
+async fn terminate_active_attempt(
+    session: &Session,
+    db: &crate::StateDbHandle,
+    task: &SwarmTask,
+    error: &str,
+    objective_failure: bool,
+) -> anyhow::Result<()> {
+    let thread_id = task
+        .assigned_thread_id
+        .as_deref()
+        .and_then(|value| ThreadId::from_string(value).ok());
+    let tokens = if let Some(thread_id) = thread_id {
+        session
+            .services
+            .agent_control
+            .child_token_usage(thread_id)
+            .await
+    } else {
+        0
+    };
+    record_failed_attempt(db, task, error, tokens).await?;
+    if let Some(thread_id) = thread_id {
+        let _ = session
+            .services
+            .agent_control
+            .shutdown_live_agent(thread_id)
+            .await;
+    }
+    if objective_failure && task.attempt_count < task.max_attempts {
+        db.escalate_swarm_task(task.id.as_str(), Some(error))
+            .await?;
+    } else {
+        db.fail_swarm_task(task.id.as_str(), error).await?;
+    }
+    Ok(())
+}
+
+async fn handle_objective_attempt_failure(
+    session: &Session,
+    db: &crate::StateDbHandle,
+    task: &SwarmTask,
+    error: &str,
+) -> anyhow::Result<()> {
+    record_failed_attempt(db, task, error, 0).await?;
+    if task.attempt_count < task.max_attempts {
+        db.escalate_swarm_task(task.id.as_str(), Some(error))
+            .await?;
+    } else {
+        db.fail_swarm_task(task.id.as_str(), error).await?;
+    }
+    shutdown_failed_task_child(session, task).await;
+    Ok(())
+}
+
+async fn handle_retryable_attempt_failure(
+    session: &Session,
+    db: &crate::StateDbHandle,
+    task: &SwarmTask,
+    error: &str,
+) -> anyhow::Result<()> {
+    record_failed_attempt(db, task, error, 0).await?;
+    if task.attempt_count < task.max_attempts {
+        db.retry_swarm_task(task.id.as_str(), Some(error)).await?;
+    } else {
+        db.fail_swarm_task(task.id.as_str(), error).await?;
+    }
+    shutdown_failed_task_child(session, task).await;
+    Ok(())
+}
+
+async fn record_failed_attempt(
+    db: &crate::StateDbHandle,
+    task: &SwarmTask,
+    error: &str,
+    tokens: i64,
+) -> anyhow::Result<()> {
+    let attempt_id = attempt_id(task);
+    if db.get_swarm_attempt(attempt_id.as_str()).await?.is_none() {
+        let unstarted_thread_id = format!("unstarted:{}", task.id);
+        db.record_swarm_attempt_start(
+            attempt_id.as_str(),
+            task.run_id.as_str(),
+            task.id.as_str(),
+            unstarted_thread_id.as_str(),
+            task.lease_owner.as_deref(),
+            None,
+            task.model_candidate_json.as_ref(),
+            task.fallback_reason.as_deref(),
+        )
+        .await?;
+    }
+    let _ = db
+        .record_swarm_attempt_end(
+            attempt_id.as_str(),
+            SwarmAttemptStatus::Failed,
+            tokens,
+            0,
+            None,
+            Some(error),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_failed_task_child(session: &Session, task: &SwarmTask) {
+    if let Some(thread_id) = task
+        .assigned_thread_id
+        .as_deref()
+        .and_then(|value| ThreadId::from_string(value).ok())
+    {
+        let _ = session
+            .services
+            .agent_control
+            .shutdown_live_agent(thread_id)
+            .await;
+    }
+}
+
+fn attempt_id(task: &SwarmTask) -> String {
+    format!("{}:attempt:{}", task.id, task.attempt_count)
+}
+
+async fn run_limit_failure(
+    session: &Session,
+    db: &crate::StateDbHandle,
+    run: &SwarmRun,
+) -> anyhow::Result<Option<String>> {
+    let now = Utc::now();
+    if run.deadline_at.is_some_and(|deadline| deadline <= now) {
+        return Ok(Some("Work Swarm deadline exceeded".to_string()));
+    }
+    if let (Some(limit), Some(started_at)) = (run.runtime_budget_seconds, run.started_at)
+        && now.signed_duration_since(started_at).num_seconds() >= limit
+    {
+        return Ok(Some("Work Swarm runtime budget exhausted".to_string()));
+    }
+    if let Some(limit) = run.token_budget {
+        let (_, tasks, _, _, _) = db.load_swarm_recovery_data(run.id.as_str()).await?;
+        let mut live_tokens = 0_i64;
+        for task in tasks
+            .iter()
+            .filter(|task| task.status == SwarmTaskStatus::Running)
+        {
+            if let Some(thread_id) = task
+                .assigned_thread_id
+                .as_deref()
+                .and_then(|value| ThreadId::from_string(value).ok())
+            {
+                live_tokens = live_tokens.saturating_add(
+                    session
+                        .services
+                        .agent_control
+                        .child_token_usage(thread_id)
+                        .await,
+                );
+            }
+        }
+        if run.token_usage.saturating_add(live_tokens) >= limit {
+            return Ok(Some("Work Swarm token budget exhausted".to_string()));
+        }
+    }
+    Ok(None)
+}
+
+async fn fail_run(
+    session: &Session,
+    turn: &TurnContext,
+    db: &crate::StateDbHandle,
+    run_id: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    shutdown_running_work_swarm_children(session, run_id).await;
+    db.mark_swarm_run_failed(run_id, reason).await?;
+    emit_work_swarm_progress(
+        session,
+        turn,
+        run_id,
+        TurnWorkSwarmProgressStatus::Failed,
+        None,
+        Some(reason),
+    )
+    .await;
+    Ok(())
+}
+
+async fn emit_work_swarm_progress(
+    session: &Session,
+    turn: &TurnContext,
+    run_id: &str,
+    status: TurnWorkSwarmProgressStatus,
+    task_id: Option<&str>,
+    error: Option<&str>,
+) {
+    let Some(db) = session.state_db() else {
+        return;
+    };
+    let Ok(progress) = db.get_swarm_run_progress(run_id).await else {
+        return;
+    };
+    let Ok(Some(run)) = db.get_swarm_run(run_id).await else {
+        return;
+    };
+    let task = if let Some(task_id) = task_id {
+        db.get_swarm_task(task_id).await.ok().flatten()
+    } else {
+        None
+    };
+    let model = task
+        .as_ref()
+        .and_then(|task| task.model_candidate_json.as_ref())
+        .and_then(|candidate| candidate.get("model"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let agent_path = if let Some(thread_id) = task
+        .as_ref()
+        .and_then(|task| task.assigned_thread_id.as_deref())
+        .and_then(|value| ThreadId::from_string(value).ok())
+    {
+        session
+            .services
+            .agent_control
+            .get_agent_metadata(thread_id)
+            .and_then(|metadata| metadata.agent_path)
+            .map(|path| path.to_string())
+    } else {
+        None
+    };
+    session
+        .send_event(
+            turn,
+            EventMsg::TurnWorkSwarmProgress(TurnWorkSwarmProgressEvent {
+                run_id: run_id.to_string(),
+                status,
+                total: progress.total_tasks as i64,
+                queued: (progress.pending_tasks
+                    + progress.ready_tasks
+                    + progress.retryable_tasks
+                    + progress.escalated_tasks) as i64,
+                running: progress.running_tasks as i64,
+                succeeded: progress.completed_tasks as i64,
+                failed: progress.failed_tasks as i64,
+                cancelled: progress.cancelled_tasks as i64,
+                skipped: 0,
+                tokens_used: run.token_usage,
+                token_budget: run.token_budget,
+                task_id: task
+                    .as_ref()
+                    .map(|task| local_task_id(run_id, task.id.as_str()).to_string()),
+                agent_path,
+                model,
+                fallback_reason: task
+                    .as_ref()
+                    .and_then(|task| task.fallback_reason.clone())
+                    .or(run.fallback_reason),
+                error: error
+                    .map(str::to_string)
+                    .or_else(|| task.and_then(|task| task.last_error)),
+            }),
+        )
+        .await;
+}
+
+async fn shutdown_running_work_swarm_children(session: &Session, run_id: &str) {
+    let Some(db) = session.state_db() else {
+        return;
+    };
+    let Ok((_, tasks, _, _, _)) = db.load_swarm_recovery_data(run_id).await else {
+        return;
+    };
+    shutdown_work_swarm_worker_threads(
+        session,
+        tasks
+            .into_iter()
+            .filter_map(|task| task.assigned_thread_id)
+            .collect(),
+    )
+    .await;
+}
+
+async fn shutdown_work_swarm_worker_threads(session: &Session, worker_thread_ids: Vec<String>) {
+    for worker_thread_id in worker_thread_ids {
+        if let Ok(thread_id) = ThreadId::from_string(worker_thread_id.as_str()) {
+            let _ = session
+                .services
+                .agent_control
+                .shutdown_live_agent(thread_id)
+                .await;
+        }
+    }
+}
+
+async fn load_execution_spec(
+    db: &crate::StateDbHandle,
+    run_id: &str,
+) -> anyhow::Result<ExecutionSpec> {
+    let run = db
+        .get_swarm_run(run_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("work swarm run {run_id} not found"))?;
+    serde_json::from_value(
+        run.spec_json
+            .ok_or_else(|| anyhow::anyhow!("work swarm run {run_id} has no execution spec"))?,
+    )
+    .map_err(Into::into)
+}
+
+async fn owned_swarm_run(
+    db: &crate::StateDbHandle,
+    session: &Session,
+    run_id: &str,
+) -> Result<SwarmRun, FunctionCallError> {
+    let run = db
+        .get_swarm_run(run_id)
+        .await
+        .map_err(runtime_error)?
+        .ok_or_else(|| {
+            FunctionCallError::RespondToModel(format!("work swarm run {run_id} not found"))
+        })?;
+    if run.thread_id != session.thread_id.to_string() {
+        return Err(FunctionCallError::RespondToModel(
+            "work swarm run belongs to another orchestrator thread".to_string(),
+        ));
+    }
+    Ok(run)
+}
+
+fn required_state_db(session: &Session) -> Result<crate::StateDbHandle, FunctionCallError> {
+    session.state_db().ok_or_else(|| {
+        FunctionCallError::Fatal("sqlite state db is unavailable for this session".to_string())
+    })
+}
+
+fn execution_spec_error(err: ExecutionSpecError) -> FunctionCallError {
+    FunctionCallError::RespondToModel(err.to_string())
+}
+
+fn runtime_error(err: anyhow::Error) -> FunctionCallError {
+    FunctionCallError::RespondToModel(err.to_string())
+}
+
+fn json_error(err: serde_json::Error) -> FunctionCallError {
+    FunctionCallError::RespondToModel(err.to_string())
+}
+
+fn saturating_u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+macro_rules! impl_tool_output {
+    ($output:ty, $tool_name:literal) => {
+        impl ToolOutput for $output {
+            fn log_preview(&self) -> String {
+                tool_output_json_text(self, $tool_name)
+            }
+
+            fn success_for_logging(&self) -> bool {
+                true
+            }
+
+            fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
+                tool_output_response_item(call_id, payload, self, Some(true), $tool_name)
+            }
+
+            fn code_mode_result(&self, _payload: &ToolPayload) -> Value {
+                tool_output_code_mode_result(self, $tool_name)
+            }
+        }
+    };
+}
+
+impl_tool_output!(StartWorkSwarmResult, "start_work_swarm");
+impl_tool_output!(CancelWorkSwarmResult, "cancel_work_swarm");
+impl_tool_output!(WorkSwarmStatusResult, "get_work_swarm_status");
+impl_tool_output!(ReportWorkSwarmResult, "report_work_swarm_result");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_task_ids_are_run_scoped_and_reversible() {
+        let stored = stored_task_id("run", "review");
+        assert_eq!(stored, "run:review");
+        assert_eq!(local_task_id("run", stored.as_str()), "review");
+    }
+
+    #[test]
+    fn report_status_rejects_unknown_values() {
+        let args = ReportWorkSwarmResultArgs {
+            run_id: "run".to_string(),
+            task_id: "run:task".to_string(),
+            result_token: "token".to_string(),
+            result: json!({}),
+            status: "confident".to_string(),
+            error: None,
+        };
+        assert!(parse_report_disposition(&args).is_err());
+    }
+
+    #[test]
+    fn work_swarm_workers_are_identified_by_their_canonical_thread_spawn_path() {
+        let worker = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(
+                codex_protocol::AgentPath::root()
+                    .join("work_swarm_019f")
+                    .unwrap(),
+            ),
+            agent_nickname: None,
+            agent_role: Some("reviewer".to_string()),
+        });
+        let ordinary = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(codex_protocol::AgentPath::root().join("reviewer").unwrap()),
+            agent_nickname: None,
+            agent_role: Some("reviewer".to_string()),
+        });
+
+        assert!(is_work_swarm_worker_source(&worker));
+        assert!(!is_work_swarm_worker_source(&ordinary));
+        assert!(!is_work_swarm_worker_source(&SessionSource::Exec));
+    }
+}

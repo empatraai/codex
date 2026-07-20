@@ -81,6 +81,7 @@ use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnWorkSwarmProgressNotification;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
@@ -332,6 +333,31 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::ModelRerouted(notification))
+                .await;
+        }
+        EventMsg::TurnWorkSwarmProgress(event) => {
+            let notification = TurnWorkSwarmProgressNotification {
+                thread_id: conversation_id.to_string(),
+                turn_id: event_turn_id.clone(),
+                run_id: event.run_id,
+                status: event.status.into(),
+                total: event.total,
+                queued: event.queued,
+                running: event.running,
+                succeeded: event.succeeded,
+                failed: event.failed,
+                cancelled: event.cancelled,
+                skipped: event.skipped,
+                tokens_used: event.tokens_used,
+                token_budget: event.token_budget,
+                task_id: event.task_id,
+                agent_path: event.agent_path,
+                model: event.model,
+                fallback_reason: event.fallback_reason,
+                error: event.error,
+            };
+            outgoing
+                .send_server_notification(ServerNotification::TurnWorkSwarmProgress(notification))
                 .await;
         }
         EventMsg::ModelVerification(event) => {

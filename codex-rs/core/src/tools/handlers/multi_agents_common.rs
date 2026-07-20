@@ -21,6 +21,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -29,6 +30,33 @@ pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIME
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpawnAgentModelRouteSource {
+    Explicit,
+    Specialist,
+    Default,
+    Parent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SpawnAgentModelCandidate {
+    pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ResolvedSpawnAgentModelRoute {
+    pub(crate) source: SpawnAgentModelRouteSource,
+    pub(crate) agent_type: Option<String>,
+    pub(crate) candidates: Vec<SpawnAgentModelCandidate>,
+    pub(crate) selected_index: usize,
+    pub(crate) max_attempts: Option<u32>,
+    pub(crate) timeout_seconds: Option<u64>,
+    pub(crate) fallback_reason: Option<String>,
+}
 
 pub(crate) fn model_supports_multi_agent_backend(
     model: &ModelPreset,
@@ -213,6 +241,34 @@ pub(crate) fn reject_full_fork_agent_type_override(
     Ok(())
 }
 
+pub(crate) fn reject_full_fork_v2_spawn_overrides(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&ReasoningEffort>,
+    service_tier: Option<&str>,
+) -> Result<(), FunctionCallError> {
+    let mut overrides = Vec::new();
+    if agent_type.is_some() {
+        overrides.push("agent_type");
+    }
+    if model.is_some() {
+        overrides.push("model");
+    }
+    if reasoning_effort.is_some() {
+        overrides.push("reasoning_effort");
+    }
+    if service_tier.is_some() {
+        overrides.push("service_tier");
+    }
+    if !overrides.is_empty() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "Full-history forked agents inherit parent routing exactly; omit {}, or spawn without a full-history fork.",
+            overrides.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
 ///
 /// These values are chosen by the live turn rather than persisted config, so leaving them stale
@@ -297,6 +353,227 @@ pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     }
 
     Ok(())
+}
+
+/// Resolves one immutable route for a child spawn without mutating shared settings.
+///
+/// Precedence is explicit request, configured specialist route, legacy child default, then exact
+/// parent inheritance. The returned ordered candidates can be reused by the Work Swarm scheduler
+/// for bounded objective-failure escalation.
+pub(crate) async fn apply_spawn_agent_model_route(
+    session: &Session,
+    turn: &TurnContext,
+    config: &mut Config,
+    agent_type: Option<&str>,
+    requested_model: Option<&str>,
+    requested_reasoning_effort: Option<ReasoningEffort>,
+    requested_service_tier: Option<&str>,
+) -> Result<ResolvedSpawnAgentModelRoute, FunctionCallError> {
+    let normalized_agent_type = agent_type.map(str::trim).filter(|value| !value.is_empty());
+    let routing = &turn.config.agent_model_routing;
+    let specialist_route = routing
+        .enabled
+        .unwrap_or(!routing.routes.is_empty())
+        .then(|| normalized_agent_type.and_then(|role| routing.routes.get(role)))
+        .flatten();
+
+    let (source, requested_candidates, max_attempts, timeout_seconds) = if let Some(model) =
+        requested_model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    {
+        (
+            SpawnAgentModelRouteSource::Explicit,
+            vec![SpawnAgentModelCandidate {
+                model: model.to_string(),
+                reasoning_effort: requested_reasoning_effort,
+                service_tier: requested_service_tier.map(str::to_string),
+            }],
+            Some(1),
+            None,
+        )
+    } else if let Some(route) = specialist_route {
+        (
+            SpawnAgentModelRouteSource::Specialist,
+            route
+                .candidates
+                .iter()
+                .map(|candidate| SpawnAgentModelCandidate {
+                    model: candidate.model.trim().to_string(),
+                    reasoning_effort: requested_reasoning_effort
+                        .clone()
+                        .or_else(|| candidate.reasoning_effort.clone()),
+                    service_tier: requested_service_tier
+                        .map(str::to_string)
+                        .or_else(|| candidate.service_tier.clone()),
+                })
+                .collect(),
+            route.max_attempts,
+            route.timeout_seconds,
+        )
+    } else if turn.config.agent_default_subagent_model.is_some()
+        || turn
+            .config
+            .agent_default_subagent_reasoning_effort
+            .is_some()
+    {
+        (
+            SpawnAgentModelRouteSource::Default,
+            vec![SpawnAgentModelCandidate {
+                model: turn
+                    .config
+                    .agent_default_subagent_model
+                    .clone()
+                    .unwrap_or_else(|| turn.model_info.slug.clone()),
+                reasoning_effort: requested_reasoning_effort
+                    .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone()),
+                service_tier: requested_service_tier.map(str::to_string),
+            }],
+            Some(1),
+            None,
+        )
+    } else {
+        (
+            SpawnAgentModelRouteSource::Parent,
+            vec![SpawnAgentModelCandidate {
+                model: turn.model_info.slug.clone(),
+                reasoning_effort: requested_reasoning_effort.or_else(|| {
+                    turn.reasoning_effort
+                        .clone()
+                        .or_else(|| turn.model_info.default_reasoning_level.clone())
+                }),
+                service_tier: requested_service_tier
+                    .map(str::to_string)
+                    .or_else(|| turn.config.service_tier.clone()),
+            }],
+            Some(1),
+            None,
+        )
+    };
+
+    let inherits_parent_model = source == SpawnAgentModelRouteSource::Parent
+        || (source == SpawnAgentModelRouteSource::Default
+            && turn.config.agent_default_subagent_model.is_none());
+    if inherits_parent_model {
+        let selected = requested_candidates
+            .into_iter()
+            .next()
+            .expect("parent/default route always contains one candidate");
+        if let Some(reasoning_effort) = selected.reasoning_effort.as_ref() {
+            validate_spawn_agent_reasoning_effort(
+                &turn.model_info.slug,
+                &turn.model_info.supported_reasoning_levels,
+                reasoning_effort,
+            )?;
+        }
+        config.model = Some(selected.model.clone());
+        config.model_reasoning_effort = selected.reasoning_effort.clone();
+        if let Some(service_tier) = selected.service_tier.clone() {
+            config.service_tier = Some(service_tier);
+        }
+        return Ok(ResolvedSpawnAgentModelRoute {
+            source,
+            agent_type: normalized_agent_type.map(str::to_string),
+            candidates: vec![selected],
+            selected_index: 0,
+            max_attempts,
+            timeout_seconds,
+            fallback_reason: None,
+        });
+    }
+
+    let available_models = session
+        .services
+        .models_manager
+        .list_models(RefreshStrategy::Offline)
+        .await;
+    let mut candidates = Vec::new();
+    let strict = source == SpawnAgentModelRouteSource::Explicit;
+    let mut rejection_reasons = Vec::new();
+    for mut candidate in requested_candidates {
+        let Some(model) = available_models.iter().find(|model| {
+            model.model == candidate.model
+                && model_supports_multi_agent_backend(model, turn.multi_agent_version)
+        }) else {
+            rejection_reasons.push(format!("{} is unavailable", candidate.model));
+            if strict {
+                find_spawn_agent_model_name(
+                    &available_models,
+                    candidate.model.as_str(),
+                    turn.multi_agent_version,
+                )?;
+            }
+            continue;
+        };
+        let model_info = session
+            .services
+            .models_manager
+            .get_model_info(&model.model, &config.to_models_manager_config())
+            .await;
+        if let Some(reasoning_effort) = candidate.reasoning_effort.as_ref()
+            && let Err(err) = validate_spawn_agent_reasoning_effort(
+                &model.model,
+                &model_info.supported_reasoning_levels,
+                reasoning_effort,
+            )
+        {
+            if strict {
+                return Err(err);
+            }
+            rejection_reasons.push(format!(
+                "{} does not support reasoning effort {}",
+                model.model, reasoning_effort
+            ));
+            continue;
+        }
+        if candidate.reasoning_effort.is_none() {
+            candidate.reasoning_effort = model_info.default_reasoning_level.clone();
+        }
+        if let Some(service_tier) = candidate.service_tier.as_deref()
+            && !model_info.supports_service_tier(service_tier)
+        {
+            if strict {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "Service tier `{service_tier}` is not supported for model `{}`",
+                    model.model
+                )));
+            }
+            rejection_reasons.push(format!(
+                "{} does not support service tier {}",
+                model.model, service_tier
+            ));
+            continue;
+        }
+        candidates.push(candidate);
+    }
+
+    let Some(selected) = candidates.first().cloned() else {
+        let reason = if rejection_reasons.is_empty() {
+            "no candidates were configured".to_string()
+        } else {
+            rejection_reasons.join("; ")
+        };
+        return Err(FunctionCallError::RespondToModel(format!(
+            "No compatible model candidate is available for agent type `{}`: {reason}",
+            normalized_agent_type.unwrap_or("default")
+        )));
+    };
+    config.model = Some(selected.model.clone());
+    config.model_reasoning_effort = selected.reasoning_effort.clone();
+    if let Some(service_tier) = selected.service_tier.clone() {
+        config.service_tier = Some(service_tier);
+    }
+
+    let fallback_reason = (!rejection_reasons.is_empty()).then(|| rejection_reasons.join("; "));
+    Ok(ResolvedSpawnAgentModelRoute {
+        source,
+        agent_type: normalized_agent_type.map(str::to_string),
+        candidates,
+        selected_index: 0,
+        max_attempts,
+        timeout_seconds,
+        fallback_reason,
+    })
 }
 
 pub(crate) async fn apply_spawn_agent_service_tier(

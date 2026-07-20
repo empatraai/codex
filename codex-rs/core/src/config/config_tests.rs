@@ -13,6 +13,9 @@ use codex_config::McpServerValueMatcher;
 use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
+use codex_config::config_toml::AgentModelCandidateToml;
+use codex_config::config_toml::AgentModelRouteToml;
+use codex_config::config_toml::AgentModelRoutingToml;
 use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
@@ -7278,6 +7281,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            model_routing: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8236,6 +8240,79 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn load_config_resolves_specialist_model_routes() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let route = AgentModelRouteToml {
+        candidates: vec![
+            AgentModelCandidateToml {
+                model: "gpt-5.6-terra".to_string(),
+                reasoning_effort: Some(ReasoningEffort::Low),
+                service_tier: None,
+            },
+            AgentModelCandidateToml {
+                model: "gpt-5.6-sol".to_string(),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                service_tier: Some("priority".to_string()),
+            },
+        ],
+        max_attempts: Some(2),
+        timeout_seconds: Some(600),
+    };
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            model_routing: Some(AgentModelRoutingToml {
+                enabled: Some(true),
+                routes: BTreeMap::from([("explorer".to_string(), route.clone())]),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.agent_model_routing.routes.get("explorer"),
+        Some(&route)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_empty_specialist_model_route() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            model_routing: Some(AgentModelRoutingToml {
+                enabled: Some(true),
+                routes: BTreeMap::from([("explorer".to_string(), AgentModelRouteToml::default())]),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("empty specialist route should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("agents.model_routing.routes.explorer.candidates")
+    );
+    Ok(())
+}
+
 #[test]
 fn agents_max_threads_alias_matches_canonical_config() {
     let canonical: ConfigToml = toml::from_str(
@@ -8269,6 +8346,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            model_routing: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8315,6 +8393,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            model_routing: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8355,6 +8434,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            model_routing: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8395,6 +8475,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            model_routing: None,
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {

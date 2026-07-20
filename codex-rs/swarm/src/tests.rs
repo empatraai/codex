@@ -1,4 +1,8 @@
 use super::*;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::time::Duration;
+use std::time::SystemTime;
 
 fn environment() -> PlanningEnvironment {
     PlanningEnvironment {
@@ -243,4 +247,271 @@ fn human_and_external_waits_cannot_be_misclassified_as_scheduler_owned() {
             ownership: WaitOwnership::Scheduler,
         })
     );
+}
+
+#[test]
+fn execution_spec_validates_dag_shape_and_deterministic_readiness() {
+    let spec = ExecutionSpec {
+        run_id: RunId("run-1".to_string()),
+        policy: ExecutionPolicy {
+            max_concurrency: 2,
+            token_budget: Some(1_000),
+            max_runtime: Some(Duration::from_secs(60)),
+            deadline: None,
+            fail_fast: true,
+            lease_ttl: Duration::from_secs(30),
+            default_max_attempts: Some(3),
+        },
+        tasks: vec![
+            TaskSpec {
+                id: TaskId("root".to_string()),
+                kind: TaskKind::Worker,
+                agent_type: "planner".to_string(),
+                instructions: "plan the work".to_string(),
+                dependencies: vec![],
+                cell: Some(CellId("alpha".to_string())),
+                explicit_model: None,
+                explicit_reasoning: None,
+                max_attempts: 2,
+                deadline: None,
+            },
+            TaskSpec {
+                id: TaskId("review".to_string()),
+                kind: TaskKind::Reviewer,
+                agent_type: "reviewer".to_string(),
+                instructions: "check the plan".to_string(),
+                dependencies: vec![TaskId("root".to_string())],
+                cell: None,
+                explicit_model: Some("gpt-4.1".to_string()),
+                explicit_reasoning: Some("low".to_string()),
+                max_attempts: 3,
+                deadline: None,
+            },
+        ],
+    };
+
+    spec.validate().unwrap();
+
+    let ready = spec.ready_tasks(&BTreeSet::from([TaskId("root".to_string())]));
+    assert_eq!(ready, vec![TaskId("review".to_string())]);
+
+    let mut statuses = BTreeMap::new();
+    statuses.insert(TaskId("review".to_string()), TaskStatus::Running);
+    let ready =
+        spec.ready_tasks_with_status_map(&statuses, &BTreeSet::from([TaskId("root".to_string())]));
+    assert!(ready.is_empty());
+}
+
+#[test]
+fn execution_spec_rejects_cycles_and_missing_dependencies() {
+    let cycle = ExecutionSpec {
+        run_id: RunId("run-2".to_string()),
+        policy: ExecutionPolicy {
+            max_concurrency: 1,
+            token_budget: None,
+            max_runtime: None,
+            deadline: None,
+            fail_fast: false,
+            lease_ttl: Duration::from_secs(5),
+            default_max_attempts: None,
+        },
+        tasks: vec![
+            TaskSpec {
+                id: TaskId("a".to_string()),
+                kind: TaskKind::Worker,
+                agent_type: "worker".to_string(),
+                instructions: "a".to_string(),
+                dependencies: vec![TaskId("b".to_string())],
+                cell: None,
+                explicit_model: None,
+                explicit_reasoning: None,
+                max_attempts: 1,
+                deadline: None,
+            },
+            TaskSpec {
+                id: TaskId("b".to_string()),
+                kind: TaskKind::Reducer,
+                agent_type: "reducer".to_string(),
+                instructions: "b".to_string(),
+                dependencies: vec![TaskId("a".to_string())],
+                cell: None,
+                explicit_model: None,
+                explicit_reasoning: None,
+                max_attempts: 1,
+                deadline: None,
+            },
+        ],
+    };
+
+    assert!(matches!(
+        cycle.validate(),
+        Err(ExecutionSpecError::CycleDetected { .. })
+    ));
+
+    let missing = ExecutionSpec {
+        run_id: RunId("run-3".to_string()),
+        policy: ExecutionPolicy {
+            max_concurrency: 1,
+            token_budget: None,
+            max_runtime: None,
+            deadline: None,
+            fail_fast: false,
+            lease_ttl: Duration::from_secs(5),
+            default_max_attempts: None,
+        },
+        tasks: vec![TaskSpec {
+            id: TaskId("solo".to_string()),
+            kind: TaskKind::Worker,
+            agent_type: "worker".to_string(),
+            instructions: "solo".to_string(),
+            dependencies: vec![TaskId("absent".to_string())],
+            cell: None,
+            explicit_model: None,
+            explicit_reasoning: None,
+            max_attempts: 1,
+            deadline: None,
+        }],
+    };
+
+    assert!(matches!(
+        missing.validate(),
+        Err(ExecutionSpecError::MissingDependency { .. })
+    ));
+}
+
+#[test]
+fn route_decision_prefers_ordered_candidates_that_are_available() {
+    let route = ModelRoute {
+        reason: "cheap-first".to_string(),
+        candidates: vec![
+            ModelCandidate {
+                model: "missing".to_string(),
+                reasoning: None,
+                service_tier: None,
+            },
+            ModelCandidate {
+                model: "present".to_string(),
+                reasoning: Some("low".to_string()),
+                service_tier: Some("standard".to_string()),
+            },
+        ],
+    };
+    let decision = route.decide(&BTreeSet::from(["present".to_string()]));
+
+    assert_eq!(
+        decision.selected,
+        Some(ModelCandidate {
+            model: "present".to_string(),
+            reasoning: Some("low".to_string()),
+            service_tier: Some("standard".to_string()),
+        })
+    );
+}
+
+#[test]
+fn lease_claim_expire_and_retry_policy_are_deterministic() {
+    let now = SystemTime::UNIX_EPOCH;
+    let mut record = LeaseRecord {
+        task: TaskStatus::Pending,
+        attempt: AttemptStatus::Pending,
+        lease: LeaseState::Unclaimed,
+    };
+
+    assert_eq!(
+        record.claim(now, Duration::from_secs(30)),
+        LeaseDecision::Granted(LeaseTransition::Claimed)
+    );
+    assert_eq!(
+        record.renew(now, Duration::from_secs(60)),
+        LeaseDecision::Granted(LeaseTransition::Renewed)
+    );
+    assert_eq!(
+        record.expire(now),
+        LeaseDecision::Rejected,
+        "lease should not expire before deadline"
+    );
+
+    let policy = AttemptPolicy {
+        max_attempts: 3,
+        escalation_threshold: 2,
+    };
+    assert!(policy.should_escalate(2, true));
+    assert!(!policy.should_escalate(1, true));
+}
+
+#[test]
+fn budget_policy_rejects_overruns() {
+    let policy = BudgetPolicy {
+        max_tokens: 100,
+        max_runtime: Duration::from_secs(10),
+    };
+
+    assert_eq!(
+        policy.admit(101, Duration::from_secs(1)),
+        BudgetAdmission::RejectedTokens
+    );
+    assert_eq!(
+        policy.admit(50, Duration::from_secs(11)),
+        BudgetAdmission::RejectedRuntime
+    );
+    assert_eq!(
+        policy.admit(50, Duration::from_secs(1)),
+        BudgetAdmission::Admitted
+    );
+}
+
+#[test]
+fn execution_policy_rejects_zero_bounds_and_projection_tracks_counts() {
+    assert_eq!(
+        ExecutionPolicy {
+            max_concurrency: 0,
+            token_budget: None,
+            max_runtime: None,
+            deadline: None,
+            fail_fast: false,
+            lease_ttl: Duration::from_secs(1),
+            default_max_attempts: None,
+        }
+        .validate(),
+        Err(ExecutionSpecError::InvalidMaxConcurrency)
+    );
+
+    assert_eq!(
+        ExecutionPolicy {
+            max_concurrency: 1,
+            token_budget: None,
+            max_runtime: None,
+            deadline: None,
+            fail_fast: false,
+            lease_ttl: Duration::from_secs(0),
+            default_max_attempts: None,
+        }
+        .validate(),
+        Err(ExecutionSpecError::InvalidLeaseTtl)
+    );
+
+    let projection = RunProjection {
+        run_id: RunId("run-4".to_string()),
+        status: RunStatus::Running,
+        total_tasks: 5,
+        ready_tasks: 1,
+        pending_tasks: 1,
+        running_tasks: 1,
+        succeeded_tasks: 1,
+        failed_tasks: 0,
+        cancelled_tasks: 1,
+        blocked_tasks: 0,
+        skipped_tasks: 0,
+        selected_model: Some("cheap-model".to_string()),
+        fallback_reason: Some("fallback".to_string()),
+        token_budget: Some(2_000),
+        token_budget_used: 500,
+        runtime_budget_used: Duration::from_secs(12),
+        cancellation_requested: false,
+    };
+
+    assert_eq!(projection.total_tasks, 5);
+    assert_eq!(projection.succeeded_tasks, 1);
+    assert_eq!(projection.cancelled_tasks, 1);
+    assert_eq!(projection.token_budget, Some(2_000));
 }

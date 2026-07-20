@@ -198,6 +198,42 @@ pub fn create_send_message_tool() -> ToolSpec {
             ))
             .with_encrypted(),
         ),
+        (
+            "run_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional run identifier for routing metadata.".to_string(),
+            )),
+        ),
+        (
+            "correlation_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional correlation identifier for routing metadata.".to_string(),
+            )),
+        ),
+        (
+            "in_reply_to".to_string(),
+            JsonSchema::string(Some(
+                "Optional message id this delivery replies to.".to_string(),
+            )),
+        ),
+        (
+            "topic".to_string(),
+            JsonSchema::string(Some(
+                "Optional topic metadata; does not affect delivery routing.".to_string(),
+            )),
+        ),
+        (
+            "priority".to_string(),
+            JsonSchema::string(Some(
+                "Optional delivery priority: low, normal, high, or critical.".to_string(),
+            )),
+        ),
+        (
+            "ttl_seconds".to_string(),
+            JsonSchema::number(Some(
+                "Optional delivery TTL in seconds, from 1 to 86400.".to_string(),
+            )),
+        ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
@@ -230,6 +266,42 @@ pub fn create_followup_task_tool() -> ToolSpec {
                 "Message text to send to the target agent.".to_string(),
             ))
             .with_encrypted(),
+        ),
+        (
+            "run_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional run identifier for routing metadata.".to_string(),
+            )),
+        ),
+        (
+            "correlation_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional correlation identifier for routing metadata.".to_string(),
+            )),
+        ),
+        (
+            "in_reply_to".to_string(),
+            JsonSchema::string(Some(
+                "Optional message id this delivery replies to.".to_string(),
+            )),
+        ),
+        (
+            "topic".to_string(),
+            JsonSchema::string(Some(
+                "Optional topic metadata; does not affect delivery routing.".to_string(),
+            )),
+        ),
+        (
+            "priority".to_string(),
+            JsonSchema::string(Some(
+                "Optional delivery priority: low, normal, high, or critical.".to_string(),
+            )),
+        ),
+        (
+            "ttl_seconds".to_string(),
+            JsonSchema::number(Some(
+                "Optional delivery TTL in seconds, from 1 to 86400.".to_string(),
+            )),
         ),
     ]);
 

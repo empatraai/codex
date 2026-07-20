@@ -488,6 +488,8 @@ export type { TurnStartedNotification } from "./TurnStartedNotification";
 export type { TurnStatus } from "./TurnStatus";
 export type { TurnSteerParams } from "./TurnSteerParams";
 export type { TurnSteerResponse } from "./TurnSteerResponse";
+export type { TurnWorkSwarmProgressNotification } from "./TurnWorkSwarmProgressNotification";
+export type { TurnWorkSwarmProgressStatus } from "./TurnWorkSwarmProgressStatus";
 export type { TurnsPage } from "./TurnsPage";
 export type { UserInput } from "./UserInput";
 export type { WarningNotification } from "./WarningNotification";

@@ -51,6 +51,10 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
+use crate::tools::handlers::work_swarm::CancelWorkSwarmHandler;
+use crate::tools::handlers::work_swarm::GetWorkSwarmStatusHandler;
+use crate::tools::handlers::work_swarm::ReportWorkSwarmResultHandler;
+use crate::tools::handlers::work_swarm::StartWorkSwarmHandler;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
 use crate::tools::hosted_spec::create_web_search_tool;
@@ -805,24 +809,38 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            planned_tools.add_arc(override_tool_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                        hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
-                        multi_agent_version: turn_context.multi_agent_version,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                    }),
-                    tool_namespace,
-                ),
-                exposure,
-            ));
+            let is_work_swarm_worker =
+                crate::tools::handlers::work_swarm::is_work_swarm_worker_source(
+                    &turn_context.session_source,
+                );
+            let is_root_orchestrator = turn_context
+                .session_source
+                .get_agent_path()
+                .is_none_or(|path| path.is_root());
+            if !is_work_swarm_worker {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                            available_models: turn_context.available_models.clone(),
+                            agent_type_description,
+                            expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                            hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
+                            expose_spawn_agent_model_overrides: turn_context
+                                .config
+                                .multi_agent_v2
+                                .expose_spawn_agent_model_overrides,
+                            multi_agent_version: turn_context.multi_agent_version,
+                            usage_hint_text: turn_context
+                                .config
+                                .multi_agent_v2
+                                .usage_hint_text
+                                .clone(),
+                        }),
+                        tool_namespace,
+                    ),
+                    exposure,
+                ));
+            }
             planned_tools.add_arc(override_tool_exposure(
                 multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
                 exposure,
@@ -846,6 +864,26 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                 exposure,
             ));
+            if is_root_orchestrator && !is_work_swarm_worker {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(StartWorkSwarmHandler, tool_namespace),
+                    exposure,
+                ));
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(GetWorkSwarmStatusHandler, tool_namespace),
+                    exposure,
+                ));
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(CancelWorkSwarmHandler, tool_namespace),
+                    exposure,
+                ));
+            }
+            if is_work_swarm_worker {
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(ReportWorkSwarmResultHandler, tool_namespace),
+                    exposure,
+                ));
+            }
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);

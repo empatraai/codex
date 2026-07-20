@@ -33,6 +33,12 @@ impl Handler {
             MessageDeliveryMode::QueueOnly,
             args.target,
             args.message,
+            args.run_id,
+            args.correlation_id,
+            args.in_reply_to,
+            args.topic,
+            args.priority,
+            args.ttl_seconds,
         )
         .await
         .map(boxed_tool_output)

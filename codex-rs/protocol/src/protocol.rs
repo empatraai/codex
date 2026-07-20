@@ -721,14 +721,59 @@ impl From<Vec<UserInput>> for Op {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum InterAgentCommunicationPriority {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+impl Default for InterAgentCommunicationPriority {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl InterAgentCommunicationPriority {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Normal => 1,
+            Self::High => 2,
+            Self::Critical => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct InterAgentCommunication {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub in_reply_to: Option<String>,
     pub author: AgentPath,
     pub recipient: AgentPath,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_recipients: Vec<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub topic: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub priority: Option<InterAgentCommunicationPriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ttl_seconds: Option<i64>,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -749,9 +794,15 @@ impl InterAgentCommunication {
     ) -> Self {
         Self {
             id: None,
+            run_id: None,
+            correlation_id: None,
+            in_reply_to: None,
             author,
             recipient,
             other_recipients,
+            topic: None,
+            priority: None,
+            ttl_seconds: None,
             content,
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
@@ -768,9 +819,15 @@ impl InterAgentCommunication {
     ) -> Self {
         Self {
             id: None,
+            run_id: None,
+            correlation_id: None,
+            in_reply_to: None,
             author,
             recipient,
             other_recipients,
+            topic: None,
+            priority: None,
+            ttl_seconds: None,
             content: String::new(),
             encrypted_content: Some(encrypted_content),
             internal_chat_message_metadata_passthrough: None,
@@ -788,6 +845,12 @@ impl InterAgentCommunication {
     pub fn to_response_input_item(&self) -> ResponseInputItem {
         let mut communication = self.clone();
         communication.id = None;
+        communication.run_id = None;
+        communication.correlation_id = None;
+        communication.in_reply_to = None;
+        communication.topic = None;
+        communication.ttl_seconds = None;
+        communication.priority = None;
         communication.internal_chat_message_metadata_passthrough = None;
         ResponseInputItem::Message {
             role: "assistant".to_string(),
@@ -1289,6 +1352,9 @@ pub enum EventMsg {
 
     /// Model routing changed from the requested model to a different model.
     ModelReroute(ModelRerouteEvent),
+
+    /// Turn/work swarm progress update for non-transcript telemetry.
+    TurnWorkSwarmProgress(TurnWorkSwarmProgressEvent),
 
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
@@ -1960,6 +2026,49 @@ pub struct ModelRerouteEvent {
     pub from_model: String,
     pub to_model: String,
     pub reason: ModelRerouteReason,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct TurnWorkSwarmProgressEvent {
+    pub run_id: String,
+    pub status: TurnWorkSwarmProgressStatus,
+    pub total: i64,
+    pub queued: i64,
+    pub running: i64,
+    pub succeeded: i64,
+    pub failed: i64,
+    pub cancelled: i64,
+    pub skipped: i64,
+    pub tokens_used: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub token_budget: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fallback_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TurnWorkSwarmProgressStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -4513,9 +4622,15 @@ mod tests {
     fn inter_agent_communication_response_input_item_preserves_commentary_phase() {
         let mut communication = InterAgentCommunication {
             id: Some("amsg_1".to_string()),
+            run_id: Some("run-1".to_string()),
+            correlation_id: Some("corr-1".to_string()),
+            in_reply_to: Some("amsg-0".to_string()),
             author: AgentPath::root(),
             recipient: AgentPath::root().join("reviewer").expect("recipient path"),
             other_recipients: vec![AgentPath::root().join("worker").expect("recipient path")],
+            topic: Some("topic".to_string()),
+            priority: Some(InterAgentCommunicationPriority::High),
+            ttl_seconds: Some(60),
             content: "review the diff".to_string(),
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
@@ -4524,6 +4639,12 @@ mod tests {
         communication.set_turn_id_if_missing("turn-1");
         let mut serialized_communication = communication.clone();
         serialized_communication.id = None;
+        serialized_communication.run_id = None;
+        serialized_communication.correlation_id = None;
+        serialized_communication.in_reply_to = None;
+        serialized_communication.topic = None;
+        serialized_communication.ttl_seconds = None;
+        serialized_communication.priority = None;
         serialized_communication.internal_chat_message_metadata_passthrough = None;
 
         assert_eq!(
@@ -4537,6 +4658,25 @@ mod tests {
                 phase: Some(MessagePhase::Commentary),
             }
         );
+    }
+
+    #[test]
+    fn inter_agent_communication_new_uses_default_metadata() {
+        let communication = InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root(),
+            Vec::new(),
+            "hello".to_string(),
+            false,
+        );
+
+        assert_eq!(communication.id, None);
+        assert_eq!(communication.run_id, None);
+        assert_eq!(communication.correlation_id, None);
+        assert_eq!(communication.in_reply_to, None);
+        assert_eq!(communication.topic, None);
+        assert_eq!(communication.priority, None);
+        assert_eq!(communication.ttl_seconds, None);
     }
 
     #[test]

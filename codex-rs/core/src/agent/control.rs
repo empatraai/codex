@@ -39,6 +39,7 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
+use serde_json::json;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -137,6 +138,20 @@ impl AgentControl {
         self.rollout_budget.as_ref()
     }
 
+    pub(crate) async fn child_token_usage(&self, agent_id: ThreadId) -> i64 {
+        let Ok(state) = self.upgrade() else {
+            return 0;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return 0;
+        };
+        thread
+            .token_usage_info()
+            .await
+            .map(|info| info.total_token_usage.total_tokens)
+            .unwrap_or(0)
+    }
+
     /// Send rich user input items to an existing agent thread.
     pub(crate) async fn send_input(
         &self,
@@ -208,9 +223,40 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        communication: InterAgentCommunication,
+        mut communication: InterAgentCommunication,
         context: AgentCommunicationContext,
     ) -> CodexResult<String> {
+        let state_db = self.state_db_for_thread(state, agent_id).await;
+        let communication_id = communication
+            .id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        communication.id = Some(communication_id.clone());
+        let mut delivery_id = None;
+        if let Some(state_db) = state_db.as_ref() {
+            delivery_id = Some(
+                self.create_inter_agent_state_rows(
+                    state_db,
+                    context.sender_thread_id(),
+                    agent_id,
+                    &communication_id,
+                    &communication,
+                )
+                .await?,
+            );
+            if self.inter_agent_communication_expired(&communication) {
+                self.dead_letter_inter_agent_state_rows(
+                    state_db,
+                    &communication_id,
+                    delivery_id.as_deref(),
+                    Some("expired before delivery"),
+                )
+                .await?;
+                return Err(CodexErr::InvalidRequest(
+                    "inter-agent communication expired before delivery".to_string(),
+                ));
+            }
+        }
         let last_task_message = last_task_message_from_communication(&communication);
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
@@ -223,6 +269,39 @@ impl AgentControl {
                     .await,
             )
             .await;
+        if let Some(state_db) = state_db.as_ref() {
+            match result.as_ref() {
+                Ok(_) => {
+                    if let Err(err) = self
+                        .mark_inter_agent_state_rows_delivered(
+                            state_db,
+                            &communication_id,
+                            delivery_id.as_deref(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to mark inter-agent communication {communication_id} delivered: {err:#}"
+                        );
+                    }
+                }
+                Err(err) => {
+                    if let Err(state_err) = self
+                        .dead_letter_inter_agent_state_rows(
+                            state_db,
+                            &communication_id,
+                            delivery_id.as_deref(),
+                            Some(&err.to_string()),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "failed to dead-letter inter-agent communication {communication_id}: {state_err:#}"
+                        );
+                    }
+                }
+            }
+        }
         if let (Some(communication), Ok(communication_id)) =
             (communication_for_log, result.as_ref())
         {
@@ -242,6 +321,140 @@ impl AgentControl {
             }
         }
         result
+    }
+
+    async fn state_db_for_thread(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        agent_id: ThreadId,
+    ) -> Option<crate::StateDbHandle> {
+        state
+            .get_thread(agent_id)
+            .await
+            .ok()
+            .and_then(|thread| thread.state_db())
+    }
+
+    fn inter_agent_communication_expired(&self, communication: &InterAgentCommunication) -> bool {
+        let Some(ttl_seconds) = communication.ttl_seconds else {
+            return false;
+        };
+        ttl_seconds <= 0
+    }
+
+    async fn create_inter_agent_state_rows(
+        &self,
+        state_db: &crate::StateDbHandle,
+        sender_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        message_id: &str,
+        communication: &InterAgentCommunication,
+    ) -> CodexResult<String> {
+        let sender_thread_id = sender_thread_id.to_string();
+        let target_thread_id = target_thread_id.to_string();
+        let metadata_json = json!({
+            "kind": "inter_agent_communication",
+            "author": communication.author.to_string(),
+            "recipient": communication.recipient.to_string(),
+            "other_recipients": communication.other_recipients.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "topic": communication.topic,
+            "priority": communication.priority,
+            "ttl_seconds": communication.ttl_seconds,
+            "trigger_turn": communication.trigger_turn,
+            "run_id": communication.run_id,
+            "correlation_id": communication.correlation_id,
+            "in_reply_to": communication.in_reply_to,
+        });
+        let delivery_id = uuid::Uuid::now_v7().to_string();
+        let params = codex_state::SwarmMessageCreateParams {
+            id: message_id.to_string(),
+            run_id: communication.run_id.clone(),
+            correlation_id: communication.correlation_id.clone(),
+            in_reply_to: communication.in_reply_to.clone(),
+            direct: true,
+            topic: communication.topic.clone(),
+            sender_thread_id: sender_thread_id.clone(),
+            target_thread_id: Some(target_thread_id.clone()),
+            priority: communication.priority.clone().unwrap_or_default().rank() as i64,
+            ttl_seconds: communication.ttl_seconds,
+            rollout_pointer: None,
+            rollout_hash: None,
+            metadata_json,
+        };
+        let (_, delivery) = state_db
+            .enqueue_inter_agent_message_with_delivery(&params, delivery_id.as_str())
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!("failed to enqueue inter-agent message: {err:#}"))
+            })?;
+        Ok(delivery.id)
+    }
+
+    async fn mark_inter_agent_state_rows_delivered(
+        &self,
+        state_db: &crate::StateDbHandle,
+        message_id: &str,
+        delivery_id: Option<&str>,
+    ) -> CodexResult<()> {
+        state_db
+            .transition_inter_agent_message(
+                message_id,
+                codex_state::InterAgentMessageStatus::Delivered,
+                None,
+            )
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to mark inter-agent message delivered: {err:#}"
+                ))
+            })?;
+        if let Some(delivery_id) = delivery_id {
+            let _ = state_db
+                .transition_inter_agent_delivery(
+                    delivery_id,
+                    codex_state::InterAgentMessageStatus::Delivered,
+                    None,
+                )
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to mark inter-agent delivery delivered: {err:#}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn dead_letter_inter_agent_state_rows(
+        &self,
+        state_db: &crate::StateDbHandle,
+        message_id: &str,
+        delivery_id: Option<&str>,
+        error: Option<&str>,
+    ) -> CodexResult<()> {
+        let _ = state_db
+            .transition_inter_agent_message(
+                message_id,
+                codex_state::InterAgentMessageStatus::DeadLettered,
+                error,
+            )
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to dead-letter inter-agent message: {err:#}"
+                ))
+            })?;
+        if let Some(delivery_id) = delivery_id {
+            let _ = state_db
+                .dead_letter_inter_agent_message_delivery(delivery_id, error)
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to dead-letter inter-agent delivery: {err:#}"
+                    ))
+                })?;
+        }
+        Ok(())
     }
 
     /// Interrupt the current task for an existing agent thread.
