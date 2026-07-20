@@ -10,6 +10,7 @@ use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
+use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
@@ -38,7 +39,8 @@ impl ImageGenerationExtensionConfig {
     fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
         Self {
             available: config.model_provider.is_openai()
-                || config.model_provider.uses_openai_actor_authorization(),
+                || config.model_provider.uses_openai_actor_authorization()
+                || config.features.enabled(Feature::ImageGenExt),
             provider: config.model_provider.clone(),
             save_root: resolve_save_root(config),
         }

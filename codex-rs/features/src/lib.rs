@@ -1169,7 +1169,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ImageGenExt,
         key: "imagegenext",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {
