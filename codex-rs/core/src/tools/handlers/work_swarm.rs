@@ -1,6 +1,8 @@
 use super::*;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
+use crate::agent::role::available_role_names;
+use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
@@ -33,6 +35,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
+use codex_protocol::error::CodexErr;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -241,6 +244,7 @@ struct WorkSwarmStatusResult {
     runtime_usage_seconds: i64,
     fallback_reason: Option<String>,
     last_error: Option<String>,
+    result: Option<Value>,
     tasks: Vec<WorkSwarmTaskStatusResult>,
 }
 
@@ -257,6 +261,7 @@ struct WorkSwarmTaskStatusResult {
     service_tier: Option<String>,
     fallback_reason: Option<String>,
     last_error: Option<String>,
+    result: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -275,6 +280,7 @@ enum ReportDisposition {
 
 #[derive(Debug)]
 enum ClaimedTaskFailure {
+    CapacityDeferred,
     Objective(String),
     Retryable(String),
     Fatal(anyhow::Error),
@@ -418,6 +424,7 @@ async fn handle_get_work_swarm_status(
                 .map(str::to_string),
             fallback_reason: task.fallback_reason,
             last_error: task.last_error,
+            result: task.result_json,
         })
         .collect();
     Ok(WorkSwarmStatusResult {
@@ -438,6 +445,7 @@ async fn handle_get_work_swarm_status(
         runtime_usage_seconds: run.runtime_usage_seconds,
         fallback_reason: run.fallback_reason,
         last_error: run.last_error,
+        result: run.result_json,
         tasks: task_statuses,
     })
 }
@@ -700,6 +708,13 @@ fn validate_request_limits(
             return Err(FunctionCallError::RespondToModel(format!(
                 "task {} exceeds the maximum of {MAX_TASK_ATTEMPTS} attempts",
                 task.id
+            )));
+        }
+        let agent_type = task.agent_type.trim();
+        if resolve_role_config(&turn.config, agent_type).is_none() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "unknown agent_type '{agent_type}'; available roles: {}",
+                available_role_names(&turn.config).join(", ")
             )));
         }
     }
@@ -1009,6 +1024,9 @@ async fn run_work_swarm(
                 Ok(()) => {
                     running += 1;
                 }
+                Err(ClaimedTaskFailure::CapacityDeferred) => {
+                    break;
+                }
                 Err(ClaimedTaskFailure::Objective(error)) => {
                     handle_objective_attempt_failure(&session, &db, &task, error.as_str()).await?;
                     emit_work_swarm_progress(
@@ -1226,7 +1244,7 @@ async fn spawn_claimed_task(
             "Work Swarm worker is missing a canonical agent path"
         ))
     })?;
-    let spawned = session
+    let spawned = match session
         .services
         .agent_control
         .spawn_agent_with_metadata(
@@ -1243,7 +1261,21 @@ async fn spawn_claimed_task(
             },
         )
         .await
-        .map_err(|err| ClaimedTaskFailure::Retryable(err.to_string()))?;
+    {
+        Ok(spawned) => spawned,
+        Err(CodexErr::AgentLimitReached { .. }) => {
+            if !db
+                .defer_swarm_task_for_capacity(task.id.as_str(), lease_owner, attempt_id.as_str())
+                .await?
+            {
+                return Err(ClaimedTaskFailure::Fatal(anyhow::anyhow!(
+                    "task lease was lost while deferring worker admission"
+                )));
+            }
+            return Err(ClaimedTaskFailure::CapacityDeferred);
+        }
+        Err(err) => return Err(ClaimedTaskFailure::Retryable(err.to_string())),
+    };
     let thread_id = spawned.thread_id;
     if !db
         .bind_swarm_attempt_thread(
@@ -2039,6 +2071,48 @@ mod tests {
             error: None,
         };
         assert!(parse_report_disposition(&args).is_err());
+    }
+
+    #[test]
+    fn work_swarm_status_serializes_run_and_task_results() {
+        let result = WorkSwarmStatusResult {
+            run_id: "run".to_string(),
+            status: "completed".to_string(),
+            total_tasks: 1,
+            pending_tasks: 0,
+            ready_tasks: 0,
+            running_tasks: 0,
+            completed_tasks: 1,
+            failed_tasks: 0,
+            retryable_tasks: 0,
+            escalated_tasks: 0,
+            cancelled_tasks: 0,
+            token_budget: None,
+            token_usage: 0,
+            runtime_budget_seconds: None,
+            runtime_usage_seconds: 0,
+            fallback_reason: None,
+            last_error: None,
+            result: Some(json!({"answer": 42})),
+            tasks: vec![WorkSwarmTaskStatusResult {
+                task_id: "task".to_string(),
+                kind: "reducer".to_string(),
+                agent_type: Some("worker".to_string()),
+                status: "completed".to_string(),
+                attempt_count: 1,
+                max_attempts: 1,
+                model: Some("model".to_string()),
+                reasoning_effort: None,
+                service_tier: None,
+                fallback_reason: None,
+                last_error: None,
+                result: Some(json!({"summary": "done"})),
+            }],
+        };
+
+        let value = serde_json::to_value(result).expect("status should serialize");
+        assert_eq!(value["result"]["answer"], 42);
+        assert_eq!(value["tasks"][0]["result"]["summary"], "done");
     }
 
     #[test]

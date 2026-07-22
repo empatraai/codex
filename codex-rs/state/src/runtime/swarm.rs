@@ -636,6 +636,54 @@ WHERE id = ? AND lease_owner = ? AND status = ?
         Ok(result.rows_affected() > 0)
     }
 
+    /// Returns a claimed task to the ready queue when worker admission failed before execution.
+    /// This is not an execution attempt, so the provisional attempt row and attempt counter are
+    /// rolled back atomically.
+    pub async fn defer_swarm_task_for_capacity(
+        &self,
+        task_id: &str,
+        lease_owner: &str,
+        attempt_id: &str,
+    ) -> anyhow::Result<bool> {
+        let now = Utc::now().timestamp();
+        let mut tx = self.pool.begin().await?;
+        let result = sqlx::query(
+            r#"
+UPDATE swarm_tasks
+SET status = ?, lease_owner = NULL, lease_until = NULL, assigned_thread_id = NULL,
+    attempt_count = MAX(attempt_count - 1, 0),
+    started_at = CASE WHEN attempt_count <= 1 THEN NULL ELSE started_at END,
+    updated_at = ?, last_error = NULL
+WHERE id = ? AND lease_owner = ? AND status = ? AND assigned_thread_id IS NULL
+            "#,
+        )
+        .bind(SwarmTaskStatus::Ready.as_str())
+        .bind(now)
+        .bind(task_id)
+        .bind(lease_owner)
+        .bind(SwarmTaskStatus::Running.as_str())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() > 0 {
+            let deleted = sqlx::query(
+                "DELETE FROM swarm_attempts WHERE id = ? AND task_id = ? AND status = ? AND thread_id = ?",
+            )
+            .bind(attempt_id)
+            .bind(task_id)
+            .bind(SwarmAttemptStatus::Running.as_str())
+            .bind(format!("pending:{task_id}"))
+            .execute(&mut *tx)
+            .await?;
+            if deleted.rows_affected() != 1 {
+                return Err(anyhow!(
+                    "capacity deferral could not remove provisional attempt {attempt_id}"
+                ));
+            }
+        }
+        tx.commit().await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     pub async fn record_swarm_attempt_start(
         &self,
         attempt_id: &str,
@@ -2091,6 +2139,87 @@ mod tests {
             .await?
             .expect("run exists");
         assert_eq!(persisted.max_concurrency, 2);
+        runtime.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capacity_deferral_does_not_consume_an_attempt() -> anyhow::Result<()> {
+        let runtime = test_runtime().await?;
+        runtime
+            .create_runnable_swarm_run(
+                &SwarmRunCreateParams {
+                    id: "capacity-run".to_string(),
+                    thread_id: "thread-root".to_string(),
+                    title: None,
+                    spec_json: None,
+                    model_candidate_json: None,
+                    fallback_reason: None,
+                    max_concurrency: 1,
+                    token_budget: None,
+                    runtime_budget_seconds: None,
+                    fail_fast: true,
+                    cancel_policy: Some("propagate".to_string()),
+                    deadline_at: None,
+                },
+                &[SwarmTaskCreateParams {
+                    id: "capacity-task".to_string(),
+                    run_id: "capacity-run".to_string(),
+                    thread_id: "thread-root".to_string(),
+                    assigned_thread_id: None,
+                    order_index: 0,
+                    depends_on_task_ids: Vec::new(),
+                    task_kind: "worker".to_string(),
+                    agent_type: Some("worker".to_string()),
+                    instructions: Some("work".to_string()),
+                    result_token: "result-token".to_string(),
+                    model_candidate_json: None,
+                    model_route_json: None,
+                    candidate_index: Some(0),
+                    fallback_reason: None,
+                    max_attempts: 1,
+                    deadline_at: None,
+                }],
+            )
+            .await?;
+        let claimed = runtime
+            .claim_ready_swarm_task("capacity-run", "lease-owner", 30)
+            .await?
+            .expect("task should be claimable");
+        assert_eq!(claimed.attempt_count, 1);
+        let attempt_id = "capacity-task:attempt:1";
+        runtime
+            .record_swarm_attempt_start(
+                attempt_id,
+                "capacity-run",
+                "capacity-task",
+                "pending:capacity-task",
+                Some("lease-owner"),
+                Some(30),
+                None,
+                None,
+            )
+            .await?;
+
+        assert!(
+            runtime
+                .defer_swarm_task_for_capacity("capacity-task", "lease-owner", attempt_id)
+                .await?
+        );
+        let deferred = runtime
+            .get_swarm_task("capacity-task")
+            .await?
+            .expect("task exists");
+        assert_eq!(deferred.status, SwarmTaskStatus::Ready);
+        assert_eq!(deferred.attempt_count, 0);
+        assert_eq!(deferred.lease_owner, None);
+        assert!(runtime.get_swarm_attempt(attempt_id).await?.is_none());
+        assert!(
+            runtime
+                .claim_ready_swarm_task("capacity-run", "next-owner", 30)
+                .await?
+                .is_some()
+        );
         runtime.close().await;
         Ok(())
     }

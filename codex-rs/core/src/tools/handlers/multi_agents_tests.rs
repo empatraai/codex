@@ -443,6 +443,37 @@ fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
     );
 }
 
+#[test]
+fn multi_agent_v2_spawn_accepts_model_without_backend_metadata() {
+    let model = ModelPreset {
+        id: "gateway-model".to_string(),
+        model: "deepseek-v4-flash".to_string(),
+        display_name: "DeepSeek V4 Flash".to_string(),
+        description: String::new(),
+        default_reasoning_effort: ReasoningEffort::Medium,
+        supported_reasoning_efforts: vec![ReasoningEffortPreset {
+            effort: ReasoningEffort::Medium,
+            description: String::new(),
+        }],
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        service_tiers: Vec::new(),
+        default_service_tier: None,
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        multi_agent_version: None,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: Vec::new(),
+    };
+
+    assert_eq!(
+        find_spawn_agent_model_name(&[model], "deepseek-v4-flash", MultiAgentVersion::V2),
+        Ok("deepseek-v4-flash".to_string())
+    );
+}
+
 #[tokio::test]
 async fn spawn_agent_service_tier_override_validates_the_effective_child_model() {
     #[derive(Debug, Deserialize)]

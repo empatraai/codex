@@ -126,6 +126,12 @@ pub(crate) fn resolve_role_config<'a>(
         .or_else(|| built_in::configs().get(role_name))
 }
 
+pub(crate) fn available_role_names(config: &Config) -> Vec<String> {
+    let mut names = config.agent_roles.keys().cloned().collect::<BTreeSet<_>>();
+    names.extend(built_in::configs().keys().cloned());
+    names.into_iter().collect()
+}
+
 mod reload {
     use super::*;
 

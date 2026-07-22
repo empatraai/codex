@@ -49,6 +49,24 @@ fn session_flags_layer_count(config: &Config) -> usize {
 }
 
 #[tokio::test]
+async fn available_role_names_include_built_ins_and_configured_roles() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_roles.insert(
+        "reviewer".to_string(),
+        AgentRoleConfig {
+            description: Some("Review work".to_string()),
+            config_file: None,
+            nickname_candidates: None,
+        },
+    );
+
+    assert_eq!(
+        available_role_names(&config),
+        vec!["default", "explorer", "reviewer", "worker"]
+    );
+}
+
+#[tokio::test]
 async fn apply_role_defaults_to_default_and_leaves_config_unchanged() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let before = config.clone();
