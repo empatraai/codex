@@ -1251,6 +1251,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "send_message",
         "followup_task",
         "wait_agent",
+        "wait_work_swarm",
         "interrupt_agent",
         "list_agents",
     ] {
@@ -1434,6 +1435,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "send_message",
         "followup_task",
         "wait_agent",
+        "wait_work_swarm",
         "interrupt_agent",
         "list_agents",
     ] {

@@ -5,6 +5,7 @@ use crate::agent::role::available_role_names;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::function_tool::FunctionCallError;
+use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::ToolInvocation;
@@ -24,11 +25,13 @@ use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use crate::tools::handlers::multi_agents_common::tool_output_code_mode_result;
 use crate::tools::handlers::multi_agents_common::tool_output_json_text;
 use crate::tools::handlers::multi_agents_common::tool_output_response_item;
+use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity;
 use crate::tools::handlers::work_swarm_spec::create_cancel_work_swarm_tool;
 use crate::tools::handlers::work_swarm_spec::create_get_work_swarm_status_tool;
 use crate::tools::handlers::work_swarm_spec::create_report_work_swarm_result_tool;
 use crate::tools::handlers::work_swarm_spec::create_start_work_swarm_tool;
+use crate::tools::handlers::work_swarm_spec::create_wait_work_swarm_tool;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use chrono::DateTime;
@@ -75,12 +78,15 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio::time::sleep;
+use tokio::time::sleep_until;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -92,11 +98,21 @@ const MAX_TASK_ATTEMPTS: u32 = 8;
 const RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const WORK_SWARM_AGENT_NAME_PREFIX: &str = "work_swarm_";
 
-static ACTIVE_RUNNERS: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static ACTIVE_RUNNERS: LazyLock<Mutex<HashMap<String, watch::Sender<bool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Default)]
 pub(crate) struct StartWorkSwarmHandler;
+
+pub(crate) struct WaitWorkSwarmHandler {
+    options: WaitAgentTimeoutOptions,
+}
+
+impl WaitWorkSwarmHandler {
+    pub(crate) fn new(options: WaitAgentTimeoutOptions) -> Self {
+        Self { options }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct GetWorkSwarmStatusHandler;
@@ -137,6 +153,30 @@ impl_work_swarm_handler!(
     create_start_work_swarm_tool,
     handle_start_work_swarm
 );
+
+impl ToolExecutor<ToolInvocation> for WaitWorkSwarmHandler {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("wait_work_swarm")
+    }
+
+    fn spec(&self) -> ToolSpec {
+        create_wait_work_swarm_tool(self.options)
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            handle_wait_work_swarm(invocation)
+                .await
+                .map(boxed_tool_output)
+        })
+    }
+}
+
+impl CoreToolRuntime for WaitWorkSwarmHandler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
+    }
+}
 impl_work_swarm_handler!(
     GetWorkSwarmStatusHandler,
     "get_work_swarm_status",
@@ -205,6 +245,13 @@ struct WorkSwarmStatusArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WaitWorkSwarmArgs {
+    run_id: String,
+    timeout_ms: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReportWorkSwarmResultArgs {
     run_id: String,
     task_id: String,
@@ -247,6 +294,13 @@ struct WorkSwarmStatusResult {
     last_error: Option<String>,
     result: Option<Value>,
     tasks: Vec<WorkSwarmTaskStatusResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitWorkSwarmResult {
+    wait_outcome: String,
+    #[serde(flatten)]
+    run: WorkSwarmStatusResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -361,7 +415,7 @@ async fn handle_start_work_swarm(
         None,
     )
     .await;
-    spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
+    let _runner = spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
 
     Ok(StartWorkSwarmResult {
         run_id: run.id,
@@ -386,14 +440,100 @@ async fn handle_get_work_swarm_status(
         run.status,
         SwarmRunStatus::Pending | SwarmRunStatus::Running
     ) {
-        spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
+        let _runner =
+            spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
     }
+    work_swarm_status_result(&db, run).await
+}
+
+async fn handle_wait_work_swarm(
+    invocation: ToolInvocation,
+) -> Result<WaitWorkSwarmResult, FunctionCallError> {
+    let ToolInvocation {
+        session,
+        turn,
+        payload,
+        ..
+    } = invocation;
+    ensure_orchestrator_source(&turn)?;
+    let args: WaitWorkSwarmArgs = parse_arguments(&function_arguments(payload)?)?;
+    let timeout_ms = validated_wait_timeout_ms(args.timeout_ms, &turn)?;
+    let db = required_state_db(&session)?;
+
+    // Validate ownership before subscribing, then read again after the runner
+    // subscription is installed. The second read closes the race where the run
+    // reaches a terminal state between the first read and subscription.
+    let mut run = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+    if let Some(wait_outcome) = terminal_wait_outcome(run.status) {
+        return Ok(WaitWorkSwarmResult {
+            wait_outcome: wait_outcome.to_string(),
+            run: work_swarm_status_result(&db, run).await?,
+        });
+    }
+
+    let mut runner =
+        spawn_work_swarm_runner(Arc::clone(&session), Arc::clone(&turn), run.id.clone());
+    let turn_state = session
+        .input_queue
+        .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+        .await;
+    let (mut activity, mut pending_activity) = session
+        .input_queue
+        .subscribe_activity(turn_state.as_deref())
+        .await;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    let wait_outcome = loop {
+        run = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+        if let Some(outcome) = terminal_wait_outcome(run.status) {
+            break outcome;
+        }
+
+        match wait_for_work_swarm_wake(
+            &mut runner,
+            &mut activity,
+            pending_activity.take(),
+            deadline,
+        )
+        .await
+        {
+            WorkSwarmWaitWake::RunnerFinished => {
+                // A runner can end because another process changed durable
+                // state or because it recovered from a stale lease. Re-read
+                // first; if the run is still active, install a fresh runner.
+                run = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+                if terminal_wait_outcome(run.status).is_none() {
+                    runner = spawn_work_swarm_runner(
+                        Arc::clone(&session),
+                        Arc::clone(&turn),
+                        run.id.clone(),
+                    );
+                }
+            }
+            WorkSwarmWaitWake::Steered => break "steered",
+            WorkSwarmWaitWake::TimedOut => break "timed_out",
+        }
+    };
+
+    // A terminal transition concurrent with timeout or steering wins: callers
+    // receive the completed pipeline result instead of a stale wait outcome.
+    run = owned_swarm_run(&db, &session, args.run_id.as_str()).await?;
+    let wait_outcome = terminal_wait_outcome(run.status).unwrap_or(wait_outcome);
+    Ok(WaitWorkSwarmResult {
+        wait_outcome: wait_outcome.to_string(),
+        run: work_swarm_status_result(&db, run).await?,
+    })
+}
+
+async fn work_swarm_status_result(
+    db: &crate::StateDbHandle,
+    run: SwarmRun,
+) -> Result<WorkSwarmStatusResult, FunctionCallError> {
     let progress = db
-        .get_swarm_run_progress(args.run_id.as_str())
+        .get_swarm_run_progress(run.id.as_str())
         .await
         .map_err(runtime_error)?;
     let (_, tasks, _, _, _) = db
-        .load_swarm_recovery_data(args.run_id.as_str())
+        .load_swarm_recovery_data(run.id.as_str())
         .await
         .map_err(runtime_error)?;
     let task_statuses = tasks
@@ -449,6 +589,75 @@ async fn handle_get_work_swarm_status(
         result: run.result_json,
         tasks: task_statuses,
     })
+}
+
+fn validated_wait_timeout_ms(
+    requested: Option<i64>,
+    turn: &TurnContext,
+) -> Result<i64, FunctionCallError> {
+    let min = turn.config.multi_agent_v2.min_wait_timeout_ms;
+    let max = turn.config.multi_agent_v2.max_wait_timeout_ms;
+    match requested {
+        Some(value) if value < min => Err(FunctionCallError::RespondToModel(format!(
+            "timeout_ms must be at least {min}"
+        ))),
+        Some(value) if value > max => Err(FunctionCallError::RespondToModel(format!(
+            "timeout_ms must be at most {max}"
+        ))),
+        Some(value) => Ok(value),
+        None => Ok(turn.config.multi_agent_v2.default_wait_timeout_ms),
+    }
+}
+
+fn terminal_wait_outcome(status: SwarmRunStatus) -> Option<&'static str> {
+    match status {
+        SwarmRunStatus::Completed => Some("completed"),
+        SwarmRunStatus::Failed => Some("failed"),
+        SwarmRunStatus::Cancelled => Some("cancelled"),
+        SwarmRunStatus::Pending | SwarmRunStatus::Running => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkSwarmWaitWake {
+    RunnerFinished,
+    Steered,
+    TimedOut,
+}
+
+async fn wait_for_work_swarm_wake(
+    runner: &mut watch::Receiver<bool>,
+    activity: &mut watch::Receiver<InputQueueActivity>,
+    pending_activity: Option<InputQueueActivity>,
+    deadline: Instant,
+) -> WorkSwarmWaitWake {
+    if pending_activity == Some(InputQueueActivity::Steer) {
+        return WorkSwarmWaitWake::Steered;
+    }
+    if *runner.borrow_and_update() {
+        return WorkSwarmWaitWake::RunnerFinished;
+    }
+
+    let mut activity_open = true;
+    loop {
+        tokio::select! {
+            changed = runner.changed() => {
+                if changed.is_err() || *runner.borrow_and_update() {
+                    return WorkSwarmWaitWake::RunnerFinished;
+                }
+            }
+            changed = activity.changed(), if activity_open => {
+                match changed {
+                    Ok(()) if *activity.borrow_and_update() == InputQueueActivity::Steer => {
+                        return WorkSwarmWaitWake::Steered;
+                    }
+                    Ok(()) => {}
+                    Err(_) => activity_open = false,
+                }
+            }
+            _ = sleep_until(deadline) => return WorkSwarmWaitWake::TimedOut,
+        }
+    }
 }
 
 async fn handle_cancel_work_swarm(
@@ -874,16 +1083,31 @@ fn parse_datetime(value: Option<&str>) -> Result<Option<DateTime<Utc>>, Function
         .transpose()
 }
 
-fn spawn_work_swarm_runner(session: Arc<Session>, turn: Arc<TurnContext>, run_id: String) {
-    let inserted = ACTIVE_RUNNERS
+fn spawn_work_swarm_runner(
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
+    run_id: String,
+) -> watch::Receiver<bool> {
+    let mut runners = ACTIVE_RUNNERS
         .lock()
-        .map(|mut runners| runners.insert(run_id.clone()))
-        .unwrap_or(false);
-    if !inserted {
-        return;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = runners.get(run_id.as_str()) {
+        return existing.subscribe();
     }
+    let (finished_tx, finished_rx) = watch::channel(false);
+    runners.insert(run_id.clone(), finished_tx.clone());
+    drop(runners);
+
+    let runner = tokio::spawn(run_work_swarm(
+        Arc::clone(&session),
+        Arc::clone(&turn),
+        run_id.clone(),
+    ));
     tokio::spawn(async move {
-        let result = run_work_swarm(Arc::clone(&session), Arc::clone(&turn), run_id.clone()).await;
+        let result = match runner.await {
+            Ok(result) => result,
+            Err(err) => Err(anyhow::anyhow!("Work Swarm runner task terminated: {err}")),
+        };
         if let Err(err) = result {
             let error = err.to_string();
             warn!("work swarm run {run_id} failed: {err:#}");
@@ -903,10 +1127,13 @@ fn spawn_work_swarm_runner(session: Arc<Session>, turn: Arc<TurnContext>, run_id
             )
             .await;
         }
-        if let Ok(mut runners) = ACTIVE_RUNNERS.lock() {
-            runners.remove(run_id.as_str());
-        }
+        finished_tx.send_replace(true);
+        ACTIVE_RUNNERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(run_id.as_str());
     });
+    finished_rx
 }
 
 /// Restarts durable Work Swarm runs when an orchestrator session resumes after a process crash.
@@ -922,7 +1149,8 @@ pub(crate) async fn resume_active_work_swarms(session: &Arc<Session>, turn: &Arc
     match db.list_active_swarm_runs(thread_id.as_str()).await {
         Ok(runs) => {
             for run in runs {
-                spawn_work_swarm_runner(Arc::clone(session), Arc::clone(turn), run.id);
+                let _runner =
+                    spawn_work_swarm_runner(Arc::clone(session), Arc::clone(turn), run.id);
             }
         }
         Err(err) => warn!("failed to recover active Work Swarm runs: {err:#}"),
@@ -2057,6 +2285,7 @@ macro_rules! impl_tool_output {
 impl_tool_output!(StartWorkSwarmResult, "start_work_swarm");
 impl_tool_output!(CancelWorkSwarmResult, "cancel_work_swarm");
 impl_tool_output!(WorkSwarmStatusResult, "get_work_swarm_status");
+impl_tool_output!(WaitWorkSwarmResult, "wait_work_swarm");
 impl_tool_output!(ReportWorkSwarmResult, "report_work_swarm_result");
 
 #[cfg(test)]
@@ -2123,6 +2352,103 @@ mod tests {
         let value = serde_json::to_value(result).expect("status should serialize");
         assert_eq!(value["result"]["answer"], 42);
         assert_eq!(value["tasks"][0]["result"]["summary"], "done");
+    }
+
+    #[test]
+    fn wait_work_swarm_result_flattens_the_terminal_snapshot() {
+        let result = WaitWorkSwarmResult {
+            wait_outcome: "completed".to_string(),
+            run: WorkSwarmStatusResult {
+                run_id: "run".to_string(),
+                status: "completed".to_string(),
+                total_tasks: 0,
+                pending_tasks: 0,
+                ready_tasks: 0,
+                running_tasks: 0,
+                completed_tasks: 0,
+                failed_tasks: 0,
+                retryable_tasks: 0,
+                escalated_tasks: 0,
+                cancelled_tasks: 0,
+                token_budget: None,
+                token_usage: 0,
+                runtime_budget_seconds: None,
+                runtime_usage_seconds: 0,
+                fallback_reason: None,
+                last_error: None,
+                result: Some(json!({"answer": "done"})),
+                tasks: Vec::new(),
+            },
+        };
+
+        let value = serde_json::to_value(result).expect("wait result should serialize");
+        assert_eq!(value["wait_outcome"], "completed");
+        assert_eq!(value["run_id"], "run");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["result"]["answer"], "done");
+        assert!(value.get("run").is_none());
+    }
+
+    #[test]
+    fn terminal_wait_outcome_covers_every_terminal_run_status() {
+        assert_eq!(
+            terminal_wait_outcome(SwarmRunStatus::Completed),
+            Some("completed")
+        );
+        assert_eq!(
+            terminal_wait_outcome(SwarmRunStatus::Failed),
+            Some("failed")
+        );
+        assert_eq!(
+            terminal_wait_outcome(SwarmRunStatus::Cancelled),
+            Some("cancelled")
+        );
+        assert_eq!(terminal_wait_outcome(SwarmRunStatus::Pending), None);
+        assert_eq!(terminal_wait_outcome(SwarmRunStatus::Running), None);
+    }
+
+    #[tokio::test]
+    async fn swarm_wait_wakes_when_the_runner_finishes() {
+        let (runner_tx, mut runner_rx) = watch::channel(false);
+        let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+        runner_tx.send_replace(true);
+
+        let wake = wait_for_work_swarm_wake(
+            &mut runner_rx,
+            &mut activity_rx,
+            Some(InputQueueActivity::Mailbox),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(wake, WorkSwarmWaitWake::RunnerFinished);
+    }
+
+    #[tokio::test]
+    async fn swarm_wait_is_interrupted_by_pending_user_steer() {
+        let (_runner_tx, mut runner_rx) = watch::channel(false);
+        let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+        let wake = wait_for_work_swarm_wake(
+            &mut runner_rx,
+            &mut activity_rx,
+            Some(InputQueueActivity::Steer),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(wake, WorkSwarmWaitWake::Steered);
+    }
+
+    #[tokio::test]
+    async fn swarm_wait_times_out_without_runner_or_user_activity() {
+        let (_runner_tx, mut runner_rx) = watch::channel(false);
+        let (_activity_tx, mut activity_rx) = watch::channel(InputQueueActivity::Mailbox);
+
+        let wake =
+            wait_for_work_swarm_wake(&mut runner_rx, &mut activity_rx, None, Instant::now()).await;
+
+        assert_eq!(wake, WorkSwarmWaitWake::TimedOut);
     }
 
     #[test]

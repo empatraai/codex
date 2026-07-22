@@ -1,3 +1,4 @@
+use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
@@ -109,7 +110,7 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "start_work_swarm".to_string(),
         description:
-            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Keep simple or tightly sequential work solo. Adapt agent_type and instructions to the task domain; use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id; use get_work_swarm_status to inspect progress."
+            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Keep simple or tightly sequential work solo. Adapt agent_type and instructions to the task domain; use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id. Use wait_work_swarm—not wait_agent—when the final pipeline result is required; use get_work_swarm_status only for a non-blocking progress snapshot."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -126,6 +127,34 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
             ),
             ]),
             Some(vec!["policy".to_string(), "tasks".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
+
+pub fn create_wait_work_swarm_tool(options: WaitAgentTimeoutOptions) -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: "wait_work_swarm".to_string(),
+        description: "Wait for an entire Work Swarm DAG to reach a terminal run status. This waits for the scheduler pipeline identified by run_id, including dependent reducers and reviewers; it must be used instead of wait_agent for Work Swarm runs. The wait ends on completed, failed, or cancelled status, when new user input is steered into the active turn, or at the bounded timeout. On timeout, call wait_work_swarm again with the same run_id. Returns the full run and per-task result snapshot."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            BTreeMap::from([
+                (
+                    "run_id".to_string(),
+                    string_schema("Identifier returned by start_work_swarm."),
+                ),
+                (
+                    "timeout_ms".to_string(),
+                    JsonSchema::number(Some(format!(
+                        "Bounded wait in milliseconds. Defaults to {}, min {}, max {}.",
+                        options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
+                    ))),
+                ),
+            ]),
+            Some(vec!["run_id".to_string()]),
             Some(false.into()),
         ),
         output_schema: None,
@@ -243,6 +272,13 @@ mod tests {
                 _ => panic!("expected function tool"),
             },
             "start_work_swarm"
+        );
+        assert_eq!(
+            match create_wait_work_swarm_tool(WaitAgentTimeoutOptions::default()) {
+                ToolSpec::Function(tool) => tool.name,
+                _ => panic!("expected function tool"),
+            },
+            "wait_work_swarm"
         );
         assert_eq!(
             match create_get_work_swarm_status_tool() {
