@@ -477,6 +477,7 @@ pub struct TurnPlanUpdatedNotification {
 #[ts(export_to = "v2/")]
 pub struct TurnWorkSwarmTaskProgress {
     pub id: String,
+    pub task_title: Option<String>,
     pub kind: TurnWorkSwarmTaskKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

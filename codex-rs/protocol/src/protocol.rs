@@ -2070,6 +2070,9 @@ pub struct WorkSwarmProgress {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct TurnWorkSwarmTaskProgress {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_title: Option<String>,
     pub kind: TurnWorkSwarmTaskKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -4501,6 +4504,9 @@ pub struct SubAgentActivityEvent {
     pub agent_thread_id: ThreadId,
     /// Canonical v2 path of the affected sub-agent.
     pub agent_path: AgentPath,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub task_title: Option<String>,
     pub kind: SubAgentActivityKind,
 }
 

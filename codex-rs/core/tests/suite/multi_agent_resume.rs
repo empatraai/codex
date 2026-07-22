@@ -101,6 +101,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let spawn_args = serde_json::to_string(&json!({
         "message": INITIAL_TASK,
         "task_name": "worker",
+        "task_title": "Test task",
         "agent_type": ROLE_NAME,
         "fork_turns": "none",
     }))?;

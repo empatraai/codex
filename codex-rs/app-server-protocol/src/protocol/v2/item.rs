@@ -396,6 +396,7 @@ pub enum ThreadItem {
         kind: SubAgentActivityKind,
         agent_thread_id: String,
         agent_path: String,
+        task_title: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -1031,6 +1032,7 @@ impl From<CoreTurnItem> for ThreadItem {
                 kind: activity.kind.into(),
                 agent_thread_id: activity.agent_thread_id.to_string(),
                 agent_path: activity.agent_path.to_string(),
+                task_title: activity.task_title,
             },
             CoreTurnItem::WorkSwarmActivity(activity) => {
                 let progress = activity.progress;
@@ -1061,6 +1063,7 @@ impl From<CoreTurnItem> for ThreadItem {
                         .into_iter()
                         .map(|task| TurnWorkSwarmTaskProgress {
                             id: task.id,
+                            task_title: task.task_title,
                             kind: task.kind.into(),
                             specialist: task.specialist,
                             status: task.status.into(),

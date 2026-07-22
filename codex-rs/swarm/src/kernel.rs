@@ -29,6 +29,7 @@ pub enum TaskKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskSpec {
     pub id: TaskId,
+    pub task_title: String,
     pub kind: TaskKind,
     pub agent_type: String,
     pub instructions: String,

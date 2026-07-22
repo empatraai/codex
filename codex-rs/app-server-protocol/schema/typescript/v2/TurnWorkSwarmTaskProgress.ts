@@ -4,4 +4,4 @@
 import type { TurnWorkSwarmTaskKind } from "./TurnWorkSwarmTaskKind";
 import type { TurnWorkSwarmTaskStatus } from "./TurnWorkSwarmTaskStatus";
 
-export type TurnWorkSwarmTaskProgress = { id: string, kind: TurnWorkSwarmTaskKind, specialist?: string, status: TurnWorkSwarmTaskStatus, summary?: string, dependsOn: Array<string>, attempt: bigint, maxAttempts: bigint, tokensUsed: bigint, model?: string, fallbackReason?: string, agentPath?: string, error?: string, };
+export type TurnWorkSwarmTaskProgress = { id: string, taskTitle: string | null, kind: TurnWorkSwarmTaskKind, specialist?: string, status: TurnWorkSwarmTaskStatus, summary?: string, dependsOn: Array<string>, attempt: bigint, maxAttempts: bigint, tokensUsed: bigint, model?: string, fallbackReason?: string, agentPath?: string, error?: string, };

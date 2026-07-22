@@ -48,6 +48,7 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    let task_title = validate_task_title(args.task_title.as_str())?;
     let fork_mode = args.fork_mode()?;
     let role_name = args
         .agent_type
@@ -144,6 +145,7 @@ async fn handle_spawn_agent(
             id: call_id,
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
+            task_title: Some(task_title),
             kind: SubAgentActivityKind::Started,
         },
     )
@@ -178,6 +180,7 @@ impl CoreToolRuntime for Handler {
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
+    task_title: String,
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,

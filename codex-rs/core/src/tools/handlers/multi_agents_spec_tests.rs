@@ -38,7 +38,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
-fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
+fn spawn_agent_tool_v2_requires_task_name_and_title_and_lists_visible_models() {
     let mut incompatible = model_preset("incompatible", /*show_in_picker*/ true);
     incompatible.multi_agent_version = Some(MultiAgentVersion::V1);
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
@@ -116,7 +116,11 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         parameters.required.as_ref(),
-        Some(&vec!["task_name".to_string(), "message".to_string()])
+        Some(&vec![
+            "task_name".to_string(),
+            "task_title".to_string(),
+            "message".to_string(),
+        ])
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],

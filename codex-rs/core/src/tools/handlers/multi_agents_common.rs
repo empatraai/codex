@@ -159,6 +159,21 @@ pub(crate) fn thread_spawn_source(
     }))
 }
 
+pub(crate) fn validate_task_title(task_title: &str) -> Result<String, FunctionCallError> {
+    let task_title = task_title.trim();
+    if task_title.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "task_title must not be empty".to_string(),
+        ));
+    }
+    if task_title.split_whitespace().count() > 5 {
+        return Err(FunctionCallError::RespondToModel(
+            "task_title must contain at most 5 words".to_string(),
+        ));
+    }
+    Ok(task_title.to_string())
+}
+
 pub(crate) fn parse_collab_input(
     message: Option<String>,
     items: Option<Vec<UserInput>>,
@@ -720,3 +735,7 @@ fn validate_spawn_agent_reasoning_effort(
         "Reasoning effort `{requested_reasoning_effort}` is not supported for model `{model}`. Supported reasoning efforts: {supported}"
     )))
 }
+
+#[cfg(test)]
+#[path = "multi_agents_common_tests.rs"]
+mod tests;

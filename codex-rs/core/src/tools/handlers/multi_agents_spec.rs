@@ -124,6 +124,13 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
                 .to_string(),
         )),
     );
+    properties.insert(
+        "task_title".to_string(),
+        JsonSchema::string(Some(
+            "Short human-readable task title containing at most 5 words, for example `Fix timeline ordering`."
+                .to_string(),
+        )),
+    );
 
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
@@ -136,7 +143,11 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec!["task_name".to_string(), "message".to_string()]),
+            Some(vec![
+                "task_name".to_string(),
+                "task_title".to_string(),
+                "message".to_string(),
+            ]),
             Some(false.into()),
         ),
         output_schema: Some(spawn_agent_output_schema_v2(

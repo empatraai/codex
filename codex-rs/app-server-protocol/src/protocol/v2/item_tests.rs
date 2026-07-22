@@ -70,6 +70,7 @@ fn converts_sub_agent_activity_into_thread_item() {
         kind: CoreSubAgentActivityKind::Interrupted,
         agent_thread_id,
         agent_path: AgentPath::try_from("/root/researcher").expect("valid agent path"),
+        task_title: Some("Audit renderer".to_string()),
     });
 
     assert_eq!(
@@ -79,6 +80,7 @@ fn converts_sub_agent_activity_into_thread_item() {
             kind: SubAgentActivityKind::Interrupted,
             agent_thread_id: agent_thread_id.to_string(),
             agent_path: "/root/researcher".to_string(),
+            task_title: Some("Audit renderer".to_string()),
         }
     );
 }

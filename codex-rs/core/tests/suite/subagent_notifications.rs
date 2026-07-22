@@ -529,6 +529,7 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "child",
+        "task_title": "Test task",
         "agent_type": "worker",
     }))?;
 
@@ -654,6 +655,7 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "child",
+        "task_title": "Test task",
         "agent_type": "worker",
     }))?;
 
@@ -1002,6 +1004,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
+                "task_title": "Test task",
             }),
             V2_DEFAULT_MODEL,
             V2_DEFAULT_REASONING_EFFORT,
@@ -1010,6 +1013,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             json!({
                 "message": CHILD_PROMPT,
                 "task_name": "worker",
+                "task_title": "Test task",
                 "fork_turns": "all",
                 "model": V2_REQUESTED_MODEL,
                 "reasoning_effort": V2_REQUESTED_REASONING_EFFORT,
@@ -1198,6 +1202,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "worker",
+        "task_title": "Test task",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1278,6 +1283,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
     let spawn_args = serde_json::to_string(&json!({
         "message": encrypted_message,
         "task_name": "worker",
+        "task_title": "Test task",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1410,6 +1416,7 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
     let spawn_args = serde_json::to_string(&json!({
         "message": "opaque-encrypted-message",
         "task_name": "worker",
+        "task_title": "Test task",
     }))?;
     mount_sse_once_match(
         &server,
@@ -1549,6 +1556,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
         "task_name": "worker",
+        "task_title": "Test task",
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,

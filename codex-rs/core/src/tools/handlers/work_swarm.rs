@@ -25,6 +25,7 @@ use crate::tools::handlers::multi_agents_common::thread_spawn_source;
 use crate::tools::handlers::multi_agents_common::tool_output_code_mode_result;
 use crate::tools::handlers::multi_agents_common::tool_output_json_text;
 use crate::tools::handlers::multi_agents_common::tool_output_response_item;
+use crate::tools::handlers::multi_agents_common::validate_task_title;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity;
 use crate::tools::handlers::work_swarm_spec::create_cancel_work_swarm_tool;
@@ -219,6 +220,7 @@ struct WorkSwarmPolicyArgs {
 #[serde(deny_unknown_fields)]
 struct WorkSwarmTaskArgs {
     id: String,
+    task_title: String,
     kind: String,
     agent_type: String,
     instructions: String,
@@ -973,6 +975,7 @@ fn build_execution_spec(
                 .min(MAX_TASK_ATTEMPTS);
             Ok(TaskSpec {
                 id: TaskId(task.id.trim().to_string()),
+                task_title: validate_task_title(task.task_title.as_str())?,
                 kind: parse_task_kind(task.kind.as_str())?,
                 agent_type: task.agent_type.trim().to_string(),
                 instructions: task.instructions.trim().to_string(),
@@ -1538,6 +1541,7 @@ async fn spawn_claimed_task(
             id: format!("work_swarm:{}:{}", run.id, task.id),
             agent_thread_id: thread_id,
             agent_path: worker_agent_path,
+            task_title: Some(task_spec.task_title.clone()),
             kind: SubAgentActivityKind::Started,
         },
     )
@@ -1598,6 +1602,7 @@ fn build_worker_prompt(
         "You are a narrow specialist in an Empatra Work Swarm. The root orchestrator has already planned the work. Follow this packet exactly.\n\
 Run ID: {}\n\
 Task ID: {}\n\
+Task title: {}\n\
 Task kind: {}\n\
 Agent type: {}\n\
 Run title: {}\n\
@@ -1618,6 +1623,7 @@ Completion contract:\n\
 - Stop after reporting.",
         run.id,
         task.id,
+        task_spec.task_title,
         task.task_kind,
         task.agent_type.as_deref().unwrap_or("worker"),
         run.title.as_deref().unwrap_or_default(),
@@ -1945,6 +1951,17 @@ async fn emit_work_swarm_progress(
         SwarmRunStatus::Failed => TurnWorkSwarmProgressStatus::Failed,
         SwarmRunStatus::Cancelled => TurnWorkSwarmProgressStatus::Cancelled,
     };
+    let task_titles = run
+        .spec_json
+        .as_ref()
+        .and_then(|spec| serde_json::from_value::<ExecutionSpec>(spec.clone()).ok())
+        .map(|spec| {
+            spec.tasks
+                .into_iter()
+                .map(|task| (task.id.0, task.task_title))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let queued = tasks
         .iter()
         .filter(|task| {
@@ -1985,6 +2002,9 @@ async fn emit_work_swarm_progress(
                 .map(|path| path.to_string());
             TurnWorkSwarmTaskProgress {
                 id: local_task_id(run_id, task.id.as_str()).to_string(),
+                task_title: task_titles
+                    .get(local_task_id(run_id, task.id.as_str()))
+                    .cloned(),
                 kind: match task.task_kind.as_str() {
                     "reducer" => TurnWorkSwarmTaskKind::Reducer,
                     "reviewer" => TurnWorkSwarmTaskKind::Reviewer,

@@ -21,6 +21,10 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
         BTreeMap::from([
             ("id".to_string(), string_schema("Stable task identifier.")),
             (
+                "task_title".to_string(),
+                string_schema("Short human-readable task title containing at most 5 words."),
+            ),
+            (
                 "kind".to_string(),
                 JsonSchema::string_enum(
                     vec!["worker".into(), "reducer".into(), "reviewer".into()],
@@ -69,6 +73,7 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
         ]),
         Some(vec![
             "id".to_string(),
+            "task_title".to_string(),
             "kind".to_string(),
             "agent_type".to_string(),
             "instructions".to_string(),

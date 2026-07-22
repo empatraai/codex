@@ -265,6 +265,7 @@ fn execution_spec_validates_dag_shape_and_deterministic_readiness() {
         tasks: vec![
             TaskSpec {
                 id: TaskId("root".to_string()),
+                task_title: "Plan work".to_string(),
                 kind: TaskKind::Worker,
                 agent_type: "planner".to_string(),
                 instructions: "plan the work".to_string(),
@@ -277,6 +278,7 @@ fn execution_spec_validates_dag_shape_and_deterministic_readiness() {
             },
             TaskSpec {
                 id: TaskId("review".to_string()),
+                task_title: "Review plan".to_string(),
                 kind: TaskKind::Reviewer,
                 agent_type: "reviewer".to_string(),
                 instructions: "check the plan".to_string(),
@@ -318,6 +320,7 @@ fn execution_spec_rejects_cycles_and_missing_dependencies() {
         tasks: vec![
             TaskSpec {
                 id: TaskId("a".to_string()),
+                task_title: "Run A".to_string(),
                 kind: TaskKind::Worker,
                 agent_type: "worker".to_string(),
                 instructions: "a".to_string(),
@@ -330,6 +333,7 @@ fn execution_spec_rejects_cycles_and_missing_dependencies() {
             },
             TaskSpec {
                 id: TaskId("b".to_string()),
+                task_title: "Run B".to_string(),
                 kind: TaskKind::Reducer,
                 agent_type: "reducer".to_string(),
                 instructions: "b".to_string(),
@@ -361,6 +365,7 @@ fn execution_spec_rejects_cycles_and_missing_dependencies() {
         },
         tasks: vec![TaskSpec {
             id: TaskId("solo".to_string()),
+            task_title: "Run solo".to_string(),
             kind: TaskKind::Worker,
             agent_type: "worker".to_string(),
             instructions: "solo".to_string(),

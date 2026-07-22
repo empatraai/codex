@@ -15972,6 +15972,12 @@
             "kind": {
               "$ref": "#/definitions/SubAgentActivityKind"
             },
+            "taskTitle": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "subAgentActivity"
@@ -18492,6 +18498,12 @@
           "$ref": "#/definitions/TurnWorkSwarmTaskStatus"
         },
         "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskTitle": {
           "type": [
             "string",
             "null"
