@@ -639,7 +639,8 @@ impl ThreadHistoryBuilder {
                 );
             }
             codex_protocol::items::TurnItem::CollabAgentToolCall(_)
-            | codex_protocol::items::TurnItem::SubAgentActivity(_) => {
+            | codex_protocol::items::TurnItem::SubAgentActivity(_)
+            | codex_protocol::items::TurnItem::WorkSwarmActivity(_) => {
                 self.upsert_item_in_turn_id(
                     &payload.turn_id,
                     ThreadItem::from(payload.item.clone()),
@@ -676,7 +677,8 @@ impl ThreadHistoryBuilder {
                 );
             }
             codex_protocol::items::TurnItem::CollabAgentToolCall(_)
-            | codex_protocol::items::TurnItem::SubAgentActivity(_) => {
+            | codex_protocol::items::TurnItem::SubAgentActivity(_)
+            | codex_protocol::items::TurnItem::WorkSwarmActivity(_) => {
                 self.upsert_item_in_turn_id(
                     &payload.turn_id,
                     ThreadItem::from(payload.item.clone()),
@@ -1632,6 +1634,8 @@ impl From<&PendingTurn> for Turn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnWorkSwarmCommunicationProgress;
+    use crate::TurnWorkSwarmProgressStatus;
     use crate::protocol::v2::CommandExecutionSource;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
@@ -1671,6 +1675,80 @@ mod tests {
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
+
+    fn work_swarm_item(status: TurnWorkSwarmProgressStatus, running: i64) -> ThreadItem {
+        ThreadItem::WorkSwarmActivity {
+            id: "work_swarm:run-1".to_string(),
+            run_id: "run-1".to_string(),
+            status,
+            title: None,
+            max_concurrency: 2,
+            runtime_used_seconds: 1,
+            runtime_budget_seconds: None,
+            total: 2,
+            queued: 0,
+            running,
+            succeeded: 2 - running,
+            failed: 0,
+            cancelled: 0,
+            skipped: 0,
+            tokens_used: 10,
+            token_budget: None,
+            task_id: None,
+            agent_path: None,
+            model: None,
+            fallback_reason: None,
+            error: None,
+            tasks: Vec::new(),
+            communication: TurnWorkSwarmCommunicationProgress {
+                queued: 0,
+                delivered: 0,
+                acked: 0,
+                expired: 0,
+                dead_lettered: 0,
+                cancelled: 0,
+                messages: Vec::new(),
+                messages_truncated: false,
+            },
+        }
+    }
+
+    #[test]
+    fn work_swarm_updates_keep_their_original_timeline_position() {
+        let mut items = vec![
+            ThreadItem::AgentMessage {
+                id: "before".to_string(),
+                text: "before".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+            work_swarm_item(TurnWorkSwarmProgressStatus::Running, 2),
+            ThreadItem::AgentMessage {
+                id: "after".to_string(),
+                text: "after".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+        ];
+
+        upsert_turn_item(
+            &mut items,
+            work_swarm_item(TurnWorkSwarmProgressStatus::Succeeded, 0),
+        );
+
+        assert_eq!(
+            items.iter().map(ThreadItem::id).collect::<Vec<_>>(),
+            vec!["before", "work_swarm:run-1", "after"]
+        );
+        assert!(matches!(
+            items[1],
+            ThreadItem::WorkSwarmActivity {
+                status: TurnWorkSwarmProgressStatus::Succeeded,
+                running: 0,
+                ..
+            }
+        ));
+    }
     use std::time::Duration;
     use uuid::Uuid;
 

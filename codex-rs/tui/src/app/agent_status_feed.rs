@@ -195,6 +195,7 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
         | ThreadItem::FunctionCallOutput { .. }
         | ThreadItem::CustomToolCall { .. }
         | ThreadItem::CustomToolCallOutput { .. }
+        | ThreadItem::WorkSwarmActivity { .. }
         | ThreadItem::Sleep { .. } => return None,
     };
     bounded_summary(summary)

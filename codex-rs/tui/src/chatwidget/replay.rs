@@ -198,6 +198,7 @@ impl ChatWidget {
             | ThreadItem::CustomToolCall { .. }
             | ThreadItem::CustomToolCallOutput { .. } => {}
             item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
+            ThreadItem::WorkSwarmActivity { .. } => {}
             ThreadItem::Sleep { .. } => {}
         }
 

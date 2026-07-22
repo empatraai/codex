@@ -37,9 +37,10 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::items::SubAgentActivityItem;
+use codex_protocol::items::TurnItem;
+use codex_protocol::items::WorkSwarmActivityItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
@@ -47,11 +48,11 @@ use codex_protocol::protocol::TurnWorkSwarmCommunicationKind;
 use codex_protocol::protocol::TurnWorkSwarmCommunicationMessage;
 use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress;
 use codex_protocol::protocol::TurnWorkSwarmCommunicationStatus;
-use codex_protocol::protocol::TurnWorkSwarmProgressEvent;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus;
 use codex_protocol::protocol::TurnWorkSwarmTaskKind;
 use codex_protocol::protocol::TurnWorkSwarmTaskProgress;
 use codex_protocol::protocol::TurnWorkSwarmTaskStatus;
+use codex_protocol::protocol::WorkSwarmProgress;
 use codex_state::InterAgentMessageStatus;
 use codex_state::SwarmAttemptStatus;
 use codex_state::SwarmRun;
@@ -1898,42 +1899,51 @@ async fn emit_work_swarm_progress(
         messages: communication_messages,
         messages_truncated: messages.len() > WORK_SWARM_VISIBLE_MESSAGE_LIMIT,
     };
-    session
-        .send_event(
-            turn,
-            EventMsg::TurnWorkSwarmProgress(TurnWorkSwarmProgressEvent {
-                run_id: run_id.to_string(),
-                status,
-                title: run.title,
-                max_concurrency: run.max_concurrency,
-                runtime_used_seconds: run.runtime_usage_seconds,
-                runtime_budget_seconds: run.runtime_budget_seconds,
-                total: tasks.len() as i64,
-                queued,
-                running,
-                succeeded,
-                failed,
-                cancelled,
-                skipped: 0,
-                tokens_used: run.token_usage,
-                token_budget: run.token_budget,
-                task_id: task
-                    .as_ref()
-                    .map(|task| local_task_id(run_id, task.id.as_str()).to_string()),
-                agent_path,
-                model,
-                fallback_reason: task
-                    .as_ref()
-                    .and_then(|task| task.fallback_reason.clone())
-                    .or(run.fallback_reason),
-                error: error
-                    .map(str::to_string)
-                    .or_else(|| task.and_then(|task| task.last_error)),
-                tasks: task_snapshots,
-                communication,
-            }),
-        )
-        .await;
+    let is_terminal = matches!(
+        status,
+        TurnWorkSwarmProgressStatus::Succeeded
+            | TurnWorkSwarmProgressStatus::Failed
+            | TurnWorkSwarmProgressStatus::Cancelled
+    );
+    let item = TurnItem::WorkSwarmActivity(WorkSwarmActivityItem {
+        id: format!("work_swarm:{run_id}"),
+        progress: WorkSwarmProgress {
+            run_id: run_id.to_string(),
+            status,
+            title: run.title,
+            max_concurrency: run.max_concurrency,
+            runtime_used_seconds: run.runtime_usage_seconds,
+            runtime_budget_seconds: run.runtime_budget_seconds,
+            total: tasks.len() as i64,
+            queued,
+            running,
+            succeeded,
+            failed,
+            cancelled,
+            skipped: 0,
+            tokens_used: run.token_usage,
+            token_budget: run.token_budget,
+            task_id: task
+                .as_ref()
+                .map(|task| local_task_id(run_id, task.id.as_str()).to_string()),
+            agent_path,
+            model,
+            fallback_reason: task
+                .as_ref()
+                .and_then(|task| task.fallback_reason.clone())
+                .or(run.fallback_reason),
+            error: error
+                .map(str::to_string)
+                .or_else(|| task.and_then(|task| task.last_error)),
+            tasks: task_snapshots,
+            communication,
+        },
+    });
+    if is_terminal {
+        session.emit_turn_item_completed(turn, item).await;
+    } else {
+        session.emit_turn_item_started(turn, &item).await;
+    }
 }
 
 async fn shutdown_running_work_swarm_children(session: &Session, run_id: &str) {

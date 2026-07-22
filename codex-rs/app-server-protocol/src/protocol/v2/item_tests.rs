@@ -6,9 +6,13 @@ use codex_protocol::items::CollabAgentToolCallItem;
 use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
+use codex_protocol::items::WorkSwarmActivityItem;
 use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
 use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
+use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress as CoreTurnWorkSwarmCommunicationProgress;
+use codex_protocol::protocol::TurnWorkSwarmProgressStatus as CoreTurnWorkSwarmProgressStatus;
+use codex_protocol::protocol::WorkSwarmProgress;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
@@ -77,4 +81,63 @@ fn converts_sub_agent_activity_into_thread_item() {
             agent_path: "/root/researcher".to_string(),
         }
     );
+}
+
+#[test]
+fn converts_work_swarm_activity_into_thread_item() {
+    let core_item = CoreTurnItem::WorkSwarmActivity(WorkSwarmActivityItem {
+        id: "work_swarm:run-1".to_string(),
+        progress: WorkSwarmProgress {
+            run_id: "run-1".to_string(),
+            status: CoreTurnWorkSwarmProgressStatus::Running,
+            title: Some("Release pipeline".to_string()),
+            max_concurrency: 3,
+            runtime_used_seconds: 12,
+            runtime_budget_seconds: Some(90),
+            total: 2,
+            queued: 0,
+            running: 1,
+            succeeded: 1,
+            failed: 0,
+            cancelled: 0,
+            skipped: 0,
+            tokens_used: 42,
+            token_budget: Some(100),
+            task_id: None,
+            agent_path: None,
+            model: Some("gpt-test".to_string()),
+            fallback_reason: None,
+            error: None,
+            tasks: Vec::new(),
+            communication: CoreTurnWorkSwarmCommunicationProgress {
+                queued: 0,
+                delivered: 0,
+                acked: 0,
+                expired: 0,
+                dead_lettered: 0,
+                cancelled: 0,
+                messages: Vec::new(),
+                messages_truncated: false,
+            },
+        },
+    });
+
+    let item = ThreadItem::from(core_item);
+    assert_eq!(item.id(), "work_swarm:run-1");
+    let ThreadItem::WorkSwarmActivity {
+        run_id,
+        status,
+        running,
+        succeeded,
+        model,
+        ..
+    } = item
+    else {
+        panic!("expected work swarm activity");
+    };
+    assert_eq!(run_id, "run-1");
+    assert_eq!(status, TurnWorkSwarmProgressStatus::Running);
+    assert_eq!(running, 1);
+    assert_eq!(succeeded, 1);
+    assert_eq!(model.as_deref(), Some("gpt-test"));
 }

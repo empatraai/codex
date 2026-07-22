@@ -1,5 +1,6 @@
 use crate::protocol::EventMsg;
 use crate::protocol::RolloutItem;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 
 /// Whether a rollout `item` should be persisted in rollout files.
@@ -98,16 +99,20 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::WebSearchEnd(_)
         | EventMsg::ImageGenerationEnd(_)
         | EventMsg::SubAgentActivity(_) => true,
-        EventMsg::ItemCompleted(event) => {
-            // These items have no equivalent raw ResponseItem or legacy event,
-            // so persist their completion for replay without retaining every
-            // item lifecycle event.
-            matches!(
-                event.item,
-                codex_protocol::items::TurnItem::Plan(_)
-                    | codex_protocol::items::TurnItem::Sleep(_)
-            )
-        }
+        EventMsg::ItemStarted(event) => matches!(
+            event.item,
+            TurnItem::CollabAgentToolCall(_)
+                | TurnItem::SubAgentActivity(_)
+                | TurnItem::WorkSwarmActivity(_)
+        ),
+        EventMsg::ItemCompleted(event) => matches!(
+            event.item,
+            TurnItem::Plan(_)
+                | TurnItem::Sleep(_)
+                | TurnItem::CollabAgentToolCall(_)
+                | TurnItem::SubAgentActivity(_)
+                | TurnItem::WorkSwarmActivity(_)
+        ),
         EventMsg::Error(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
@@ -127,7 +132,6 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::ModelReroute(_)
-        | EventMsg::TurnWorkSwarmProgress(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::AgentReasoningSectionBreak(_)
@@ -154,7 +158,6 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::PlanUpdate(_)
         | EventMsg::ShutdownComplete
         | EventMsg::DeprecationNotice(_)
-        | EventMsg::ItemStarted(_)
         | EventMsg::HookStarted(_)
         | EventMsg::HookCompleted(_)
         | EventMsg::AgentMessageContentDelta(_)
@@ -167,5 +170,76 @@ pub fn should_persist_event_msg(ev: &EventMsg) -> bool {
         | EventMsg::CollabWaitingBegin(_)
         | EventMsg::CollabCloseBegin(_)
         | EventMsg::CollabResumeBegin(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::ThreadId;
+    use codex_protocol::items::WorkSwarmActivityItem;
+    use codex_protocol::protocol::ItemCompletedEvent;
+    use codex_protocol::protocol::ItemStartedEvent;
+    use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress;
+    use codex_protocol::protocol::TurnWorkSwarmProgressStatus;
+    use codex_protocol::protocol::WorkSwarmProgress;
+
+    fn work_swarm_item() -> TurnItem {
+        TurnItem::WorkSwarmActivity(WorkSwarmActivityItem {
+            id: "work_swarm:run-1".to_string(),
+            progress: WorkSwarmProgress {
+                run_id: "run-1".to_string(),
+                status: TurnWorkSwarmProgressStatus::Running,
+                title: None,
+                max_concurrency: 1,
+                runtime_used_seconds: 0,
+                runtime_budget_seconds: None,
+                total: 1,
+                queued: 0,
+                running: 1,
+                succeeded: 0,
+                failed: 0,
+                cancelled: 0,
+                skipped: 0,
+                tokens_used: 0,
+                token_budget: None,
+                task_id: None,
+                agent_path: None,
+                model: None,
+                fallback_reason: None,
+                error: None,
+                tasks: Vec::new(),
+                communication: TurnWorkSwarmCommunicationProgress {
+                    queued: 0,
+                    delivered: 0,
+                    acked: 0,
+                    expired: 0,
+                    dead_lettered: 0,
+                    cancelled: 0,
+                    messages: Vec::new(),
+                    messages_truncated: false,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn persists_work_swarm_item_lifecycle_for_thread_reload() {
+        let thread_id = ThreadId::new();
+        let started = EventMsg::ItemStarted(ItemStartedEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item: work_swarm_item(),
+            started_at_ms: 1,
+        });
+        let completed = EventMsg::ItemCompleted(ItemCompletedEvent {
+            thread_id,
+            turn_id: "turn-1".to_string(),
+            item: work_swarm_item(),
+            completed_at_ms: 2,
+        });
+
+        assert!(should_persist_event_msg(&started));
+        assert!(should_persist_event_msg(&completed));
     }
 }

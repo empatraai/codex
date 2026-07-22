@@ -492,7 +492,6 @@ export type { TurnWorkSwarmCommunicationKind } from "./TurnWorkSwarmCommunicatio
 export type { TurnWorkSwarmCommunicationMessage } from "./TurnWorkSwarmCommunicationMessage";
 export type { TurnWorkSwarmCommunicationProgress } from "./TurnWorkSwarmCommunicationProgress";
 export type { TurnWorkSwarmCommunicationStatus } from "./TurnWorkSwarmCommunicationStatus";
-export type { TurnWorkSwarmProgressNotification } from "./TurnWorkSwarmProgressNotification";
 export type { TurnWorkSwarmProgressStatus } from "./TurnWorkSwarmProgressStatus";
 export type { TurnWorkSwarmTaskKind } from "./TurnWorkSwarmTaskKind";
 export type { TurnWorkSwarmTaskProgress } from "./TurnWorkSwarmTaskProgress";

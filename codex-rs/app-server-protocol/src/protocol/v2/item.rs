@@ -6,6 +6,10 @@ use super::NetworkApprovalContext;
 use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
 use super::RequestPermissionProfile;
+use super::TurnWorkSwarmCommunicationMessage;
+use super::TurnWorkSwarmCommunicationProgress;
+use super::TurnWorkSwarmProgressStatus;
+use super::TurnWorkSwarmTaskProgress;
 use super::UserInput;
 use super::shared::v2_enum_from_core;
 use crate::protocol::item_builders::convert_patch_changes;
@@ -395,6 +399,49 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    WorkSwarmActivity {
+        id: String,
+        run_id: String,
+        status: TurnWorkSwarmProgressStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        title: Option<String>,
+        max_concurrency: i64,
+        runtime_used_seconds: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        runtime_budget_seconds: Option<i64>,
+        total: i64,
+        queued: i64,
+        running: i64,
+        succeeded: i64,
+        failed: i64,
+        cancelled: i64,
+        skipped: i64,
+        tokens_used: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        token_budget: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        task_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        agent_path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        fallback_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        error: Option<String>,
+        tasks: Vec<TurnWorkSwarmTaskProgress>,
+        communication: TurnWorkSwarmCommunicationProgress,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     WebSearch {
         id: String,
         query: String,
@@ -469,6 +516,7 @@ impl ThreadItem {
             | ThreadItem::DynamicToolCall { id, .. }
             | ThreadItem::CollabAgentToolCall { id, .. }
             | ThreadItem::SubAgentActivity { id, .. }
+            | ThreadItem::WorkSwarmActivity { id, .. }
             | ThreadItem::WebSearch { id, .. }
             | ThreadItem::ImageView { id, .. }
             | ThreadItem::Sleep { id, .. }
@@ -984,6 +1032,81 @@ impl From<CoreTurnItem> for ThreadItem {
                 agent_thread_id: activity.agent_thread_id.to_string(),
                 agent_path: activity.agent_path.to_string(),
             },
+            CoreTurnItem::WorkSwarmActivity(activity) => {
+                let progress = activity.progress;
+                ThreadItem::WorkSwarmActivity {
+                    id: activity.id,
+                    run_id: progress.run_id,
+                    status: progress.status.into(),
+                    title: progress.title,
+                    max_concurrency: progress.max_concurrency,
+                    runtime_used_seconds: progress.runtime_used_seconds,
+                    runtime_budget_seconds: progress.runtime_budget_seconds,
+                    total: progress.total,
+                    queued: progress.queued,
+                    running: progress.running,
+                    succeeded: progress.succeeded,
+                    failed: progress.failed,
+                    cancelled: progress.cancelled,
+                    skipped: progress.skipped,
+                    tokens_used: progress.tokens_used,
+                    token_budget: progress.token_budget,
+                    task_id: progress.task_id,
+                    agent_path: progress.agent_path,
+                    model: progress.model,
+                    fallback_reason: progress.fallback_reason,
+                    error: progress.error,
+                    tasks: progress
+                        .tasks
+                        .into_iter()
+                        .map(|task| TurnWorkSwarmTaskProgress {
+                            id: task.id,
+                            kind: task.kind.into(),
+                            specialist: task.specialist,
+                            status: task.status.into(),
+                            summary: task.summary,
+                            depends_on: task.depends_on,
+                            attempt: task.attempt,
+                            max_attempts: task.max_attempts,
+                            tokens_used: task.tokens_used,
+                            model: task.model,
+                            fallback_reason: task.fallback_reason,
+                            agent_path: task.agent_path,
+                            error: task.error,
+                        })
+                        .collect(),
+                    communication: TurnWorkSwarmCommunicationProgress {
+                        queued: progress.communication.queued,
+                        delivered: progress.communication.delivered,
+                        acked: progress.communication.acked,
+                        expired: progress.communication.expired,
+                        dead_lettered: progress.communication.dead_lettered,
+                        cancelled: progress.communication.cancelled,
+                        messages: progress
+                            .communication
+                            .messages
+                            .into_iter()
+                            .map(|message| TurnWorkSwarmCommunicationMessage {
+                                id: message.id,
+                                sender_agent_path: message.sender_agent_path,
+                                recipient_agent_path: message.recipient_agent_path,
+                                sender_task_id: message.sender_task_id,
+                                recipient_task_id: message.recipient_task_id,
+                                kind: message.kind.into(),
+                                topic: message.topic,
+                                status: message.status.into(),
+                                preview: message.preview,
+                                content_redacted: message.content_redacted,
+                                created_at_ms: message.created_at_ms,
+                                updated_at_ms: message.updated_at_ms,
+                                correlation_id: message.correlation_id,
+                                in_reply_to: message.in_reply_to,
+                            })
+                            .collect(),
+                        messages_truncated: progress.communication.messages_truncated,
+                    },
+                }
+            }
             CoreTurnItem::ContextCompaction(compaction) => {
                 ThreadItem::ContextCompaction { id: compaction.id }
             }

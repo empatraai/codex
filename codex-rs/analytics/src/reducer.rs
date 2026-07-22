@@ -419,6 +419,7 @@ impl TurnToolCounts {
             | ThreadItem::Reasoning { .. }
             | ThreadItem::FunctionCallOutput { .. }
             | ThreadItem::CustomToolCallOutput { .. }
+            | ThreadItem::WorkSwarmActivity { .. }
             | ThreadItem::ImageView { .. }
             | ThreadItem::Sleep { .. }
             | ThreadItem::EnteredReviewMode { .. }
@@ -1756,6 +1757,7 @@ fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
         | ThreadItem::FunctionCallOutput { .. }
         | ThreadItem::CustomToolCallOutput { .. }
         | ThreadItem::SubAgentActivity { .. }
+        | ThreadItem::WorkSwarmActivity { .. }
         | ThreadItem::ImageView { .. }
         | ThreadItem::Sleep { .. }
         | ThreadItem::EnteredReviewMode { .. }

@@ -27,6 +27,7 @@ use crate::protocol::SubAgentActivityKind;
 use crate::protocol::UserMessageEvent;
 use crate::protocol::ViewImageToolCallEvent;
 use crate::protocol::WebSearchEndEvent;
+use crate::protocol::WorkSwarmProgress;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
@@ -60,6 +61,7 @@ pub enum TurnItem {
     McpToolCall(McpToolCallItem),
     CollabAgentToolCall(CollabAgentToolCallItem),
     SubAgentActivity(SubAgentActivityItem),
+    WorkSwarmActivity(WorkSwarmActivityItem),
     ContextCompaction(ContextCompactionItem),
 }
 
@@ -301,6 +303,14 @@ pub struct SubAgentActivityItem {
     pub kind: SubAgentActivityKind,
     pub agent_thread_id: ThreadId,
     pub agent_path: AgentPath,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct WorkSwarmActivityItem {
+    pub id: String,
+    pub progress: WorkSwarmProgress,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -682,6 +692,7 @@ impl TurnItem {
             TurnItem::McpToolCall(item) => item.id.clone(),
             TurnItem::CollabAgentToolCall(item) => item.id.clone(),
             TurnItem::SubAgentActivity(item) => item.id.clone(),
+            TurnItem::WorkSwarmActivity(item) => item.id.clone(),
             TurnItem::ContextCompaction(item) => item.id.clone(),
         }
     }
@@ -708,6 +719,7 @@ impl TurnItem {
             TurnItem::McpToolCall(item) => item.as_legacy_end_event().into_iter().collect(),
             TurnItem::CollabAgentToolCall(_) => Vec::new(),
             TurnItem::SubAgentActivity(_) => Vec::new(),
+            TurnItem::WorkSwarmActivity(_) => Vec::new(),
             TurnItem::Reasoning(item) => item.as_legacy_events(show_raw_agent_reasoning),
             TurnItem::ContextCompaction(item) => vec![item.as_legacy_event()],
         }

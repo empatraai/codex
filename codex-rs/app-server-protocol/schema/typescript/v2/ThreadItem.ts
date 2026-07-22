@@ -24,6 +24,9 @@ import type { McpToolCallStatus } from "./McpToolCallStatus";
 import type { MemoryCitation } from "./MemoryCitation";
 import type { PatchApplyStatus } from "./PatchApplyStatus";
 import type { SubAgentActivityKind } from "./SubAgentActivityKind";
+import type { TurnWorkSwarmCommunicationProgress } from "./TurnWorkSwarmCommunicationProgress";
+import type { TurnWorkSwarmProgressStatus } from "./TurnWorkSwarmProgressStatus";
+import type { TurnWorkSwarmTaskProgress } from "./TurnWorkSwarmTaskProgress";
 import type { UserInput } from "./UserInput";
 import type { WebSearchAction } from "./WebSearchAction";
 
@@ -106,4 +109,4 @@ reasoningEffort: ReasoningEffort | null,
 /**
  * Last known status of the target agents, when available.
  */
-agentsStates: { [key in string]?: CollabAgentState }, } | { "type": "subAgentActivity", id: string, kind: SubAgentActivityKind, agentThreadId: string, agentPath: string, } | { "type": "webSearch", id: string, query: string, action: WebSearchAction | null, } | { "type": "imageView", id: string, path: LegacyAppPathString, } | { "type": "sleep", id: string, durationMs: number, } | { "type": "imageGeneration", id: string, status: string, revisedPrompt: string | null, result: string, savedPath?: AbsolutePathBuf, } | { "type": "enteredReviewMode", id: string, review: string, } | { "type": "exitedReviewMode", id: string, review: string, } | { "type": "contextCompaction", id: string, };
+agentsStates: { [key in string]?: CollabAgentState }, } | { "type": "subAgentActivity", id: string, kind: SubAgentActivityKind, agentThreadId: string, agentPath: string, } | { "type": "workSwarmActivity", id: string, runId: string, status: TurnWorkSwarmProgressStatus, title?: string, maxConcurrency: bigint, runtimeUsedSeconds: bigint, runtimeBudgetSeconds?: bigint, total: bigint, queued: bigint, running: bigint, succeeded: bigint, failed: bigint, cancelled: bigint, skipped: bigint, tokensUsed: bigint, tokenBudget?: bigint, taskId?: string, agentPath?: string, model?: string, fallbackReason?: string, error?: string, tasks: Array<TurnWorkSwarmTaskProgress>, communication: TurnWorkSwarmCommunicationProgress, } | { "type": "webSearch", id: string, query: string, action: WebSearchAction | null, } | { "type": "imageView", id: string, path: LegacyAppPathString, } | { "type": "sleep", id: string, durationMs: number, } | { "type": "imageGeneration", id: string, status: string, revisedPrompt: string | null, result: string, savedPath?: AbsolutePathBuf, } | { "type": "enteredReviewMode", id: string, review: string, } | { "type": "exitedReviewMode", id: string, review: string, } | { "type": "contextCompaction", id: string, };

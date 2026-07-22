@@ -475,52 +475,6 @@ pub struct TurnPlanUpdatedNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
-pub struct TurnWorkSwarmProgressNotification {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub run_id: String,
-    pub status: TurnWorkSwarmProgressStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub title: Option<String>,
-    pub max_concurrency: i64,
-    pub runtime_used_seconds: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub runtime_budget_seconds: Option<i64>,
-    pub total: i64,
-    pub queued: i64,
-    pub running: i64,
-    pub succeeded: i64,
-    pub failed: i64,
-    pub cancelled: i64,
-    pub skipped: i64,
-    pub tokens_used: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub token_budget: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub task_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub agent_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub fallback_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub error: Option<String>,
-    pub tasks: Vec<TurnWorkSwarmTaskProgress>,
-    pub communication: TurnWorkSwarmCommunicationProgress,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
 pub struct TurnWorkSwarmTaskProgress {
     pub id: String,
     pub kind: TurnWorkSwarmTaskKind,

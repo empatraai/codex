@@ -81,10 +81,6 @@ use codex_app_server_protocol::TurnPlanStep;
 use codex_app_server_protocol::TurnPlanUpdatedNotification;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
-use codex_app_server_protocol::TurnWorkSwarmCommunicationMessage;
-use codex_app_server_protocol::TurnWorkSwarmCommunicationProgress;
-use codex_app_server_protocol::TurnWorkSwarmProgressNotification;
-use codex_app_server_protocol::TurnWorkSwarmTaskProgress;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
@@ -336,84 +332,6 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::ModelRerouted(notification))
-                .await;
-        }
-        EventMsg::TurnWorkSwarmProgress(event) => {
-            let notification = TurnWorkSwarmProgressNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event_turn_id.clone(),
-                run_id: event.run_id,
-                status: event.status.into(),
-                title: event.title,
-                max_concurrency: event.max_concurrency,
-                runtime_used_seconds: event.runtime_used_seconds,
-                runtime_budget_seconds: event.runtime_budget_seconds,
-                total: event.total,
-                queued: event.queued,
-                running: event.running,
-                succeeded: event.succeeded,
-                failed: event.failed,
-                cancelled: event.cancelled,
-                skipped: event.skipped,
-                tokens_used: event.tokens_used,
-                token_budget: event.token_budget,
-                task_id: event.task_id,
-                agent_path: event.agent_path,
-                model: event.model,
-                fallback_reason: event.fallback_reason,
-                error: event.error,
-                tasks: event
-                    .tasks
-                    .into_iter()
-                    .map(|task| TurnWorkSwarmTaskProgress {
-                        id: task.id,
-                        kind: task.kind.into(),
-                        specialist: task.specialist,
-                        status: task.status.into(),
-                        summary: task.summary,
-                        depends_on: task.depends_on,
-                        attempt: task.attempt,
-                        max_attempts: task.max_attempts,
-                        tokens_used: task.tokens_used,
-                        model: task.model,
-                        fallback_reason: task.fallback_reason,
-                        agent_path: task.agent_path,
-                        error: task.error,
-                    })
-                    .collect(),
-                communication: TurnWorkSwarmCommunicationProgress {
-                    queued: event.communication.queued,
-                    delivered: event.communication.delivered,
-                    acked: event.communication.acked,
-                    expired: event.communication.expired,
-                    dead_lettered: event.communication.dead_lettered,
-                    cancelled: event.communication.cancelled,
-                    messages: event
-                        .communication
-                        .messages
-                        .into_iter()
-                        .map(|message| TurnWorkSwarmCommunicationMessage {
-                            id: message.id,
-                            sender_agent_path: message.sender_agent_path,
-                            recipient_agent_path: message.recipient_agent_path,
-                            sender_task_id: message.sender_task_id,
-                            recipient_task_id: message.recipient_task_id,
-                            kind: message.kind.into(),
-                            topic: message.topic,
-                            status: message.status.into(),
-                            preview: message.preview,
-                            content_redacted: message.content_redacted,
-                            created_at_ms: message.created_at_ms,
-                            updated_at_ms: message.updated_at_ms,
-                            correlation_id: message.correlation_id,
-                            in_reply_to: message.in_reply_to,
-                        })
-                        .collect(),
-                    messages_truncated: event.communication.messages_truncated,
-                },
-            };
-            outgoing
-                .send_server_notification(ServerNotification::TurnWorkSwarmProgress(notification))
                 .await;
         }
         EventMsg::ModelVerification(event) => {

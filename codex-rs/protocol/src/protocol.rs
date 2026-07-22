@@ -1353,9 +1353,6 @@ pub enum EventMsg {
     /// Model routing changed from the requested model to a different model.
     ModelReroute(ModelRerouteEvent),
 
-    /// Turn/work swarm progress update for non-transcript telemetry.
-    TurnWorkSwarmProgress(TurnWorkSwarmProgressEvent),
-
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
 
@@ -2029,7 +2026,7 @@ pub struct ModelRerouteEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
-pub struct TurnWorkSwarmProgressEvent {
+pub struct WorkSwarmProgress {
     pub run_id: String,
     pub status: TurnWorkSwarmProgressStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
