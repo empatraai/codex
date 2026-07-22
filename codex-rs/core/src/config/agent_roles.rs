@@ -120,7 +120,12 @@ pub async fn write_global_agent_role(
     document["name"] = value(role.agent_type.clone());
     document["description"] = value(role.description.clone());
     document["developer_instructions"] = value(role.developer_instructions.clone());
-    document["model"] = value(role.model.clone());
+    if role.model.is_empty() {
+        // An absent `model` key makes the spawned agent inherit the caller's model.
+        document.remove("model");
+    } else {
+        document["model"] = value(role.model.clone());
+    }
 
     let contents = document.to_string();
     let parsed_role = global_agent_role_from_file_contents(&contents, &path, &agents_dir)?;
@@ -175,7 +180,8 @@ fn normalize_global_agent_role(role: GlobalAgentRole) -> std::io::Result<GlobalA
             "developerInstructions",
             role.developer_instructions,
         )?,
-        model: required_global_agent_role_field("model", role.model)?,
+        // An empty model means the role inherits the caller's model.
+        model: role.model.trim().to_string(),
     })
 }
 
@@ -204,7 +210,7 @@ fn global_agent_role_from_file_contents(
     })?;
     let developer_instructions =
         required_config_string(&parsed.config, "developer_instructions", role_file_label)?;
-    let model = required_config_string(&parsed.config, "model", role_file_label)?;
+    let model = optional_config_string(&parsed.config, "model", role_file_label)?;
 
     Ok(GlobalAgentRole {
         agent_type: parsed.role_name,
@@ -212,6 +218,23 @@ fn global_agent_role_from_file_contents(
         developer_instructions,
         model,
     })
+}
+
+fn optional_config_string(
+    config: &TomlValue,
+    key: &str,
+    role_file_label: &Path,
+) -> std::io::Result<String> {
+    let Some(value) = config.get(key) else {
+        return Ok(String::new());
+    };
+    let Some(value) = value.as_str() else {
+        return Err(invalid_agent_role_input(format!(
+            "agent role file at {} must define `{key}` as a string",
+            role_file_label.display()
+        )));
+    };
+    required_global_agent_role_field(key, value.to_string())
 }
 
 fn required_config_string(
@@ -883,5 +906,33 @@ model = "gpt-5.6-terra"
         assert!(validate_global_agent_type("researcher.toml").is_err());
         assert!(validate_global_agent_type("researcher").is_ok());
         assert!(validate_global_agent_type("researcher_2-fast").is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_global_agent_role_without_model_omits_model_key() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let agents_dir = codex_home.path().join("agents");
+        std::fs::create_dir_all(&agents_dir)?;
+
+        let role = write_global_agent_role(
+            codex_home.path(),
+            GlobalAgentRole {
+                agent_type: "researcher".to_string(),
+                description: "Research helper".to_string(),
+                developer_instructions: "Use primary sources.".to_string(),
+                model: String::new(),
+            },
+        )
+        .await?;
+
+        assert_eq!(role.model, "");
+        let contents = std::fs::read_to_string(agents_dir.join("researcher.toml"))?;
+        let role_file: TomlValue = toml::from_str(&contents).expect("role file parses");
+        assert!(role_file.get("model").is_none());
+
+        let roles = list_global_agent_roles(codex_home.path()).await?;
+        assert_eq!(roles, vec![role]);
+
+        Ok(())
     }
 }
