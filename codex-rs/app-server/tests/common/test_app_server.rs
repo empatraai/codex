@@ -13,6 +13,9 @@ use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use anyhow::ensure;
+use codex_app_server_protocol::AgentRoleDeleteParams;
+use codex_app_server_protocol::AgentRoleListParams;
+use codex_app_server_protocol::AgentRoleWriteParams;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
@@ -1239,6 +1242,30 @@ impl TestAppServer {
     pub async fn send_config_requirements_read_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("configRequirements/read", /*params*/ None)
             .await
+    }
+
+    pub async fn send_agent_role_list_request(
+        &mut self,
+        params: AgentRoleListParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("agentRole/list", params).await
+    }
+
+    pub async fn send_agent_role_write_request(
+        &mut self,
+        params: AgentRoleWriteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("agentRole/write", params).await
+    }
+
+    pub async fn send_agent_role_delete_request(
+        &mut self,
+        params: AgentRoleDeleteParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("agentRole/delete", params).await
     }
 
     pub async fn send_config_value_write_request(

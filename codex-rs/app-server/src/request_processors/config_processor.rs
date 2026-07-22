@@ -7,9 +7,17 @@ use crate::error_code::invalid_request;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
+use codex_app_server_protocol::AgentRole;
+use codex_app_server_protocol::AgentRoleDeleteParams;
+use codex_app_server_protocol::AgentRoleDeleteResponse;
+use codex_app_server_protocol::AgentRoleListParams;
+use codex_app_server_protocol::AgentRoleListResponse;
+use codex_app_server_protocol::AgentRoleWriteParams;
+use codex_app_server_protocol::AgentRoleWriteResponse;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::ComputerUseRequirements;
 use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit;
 use codex_app_server_protocol::ConfigReadParams;
 use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::ConfigRequirements;
@@ -23,6 +31,7 @@ use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ManagedHooksRequirements;
+use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::ModelProviderCapabilitiesReadResponse;
 use codex_app_server_protocol::NetworkDomainPermission;
 use codex_app_server_protocol::NetworkRequirements;
@@ -37,11 +46,17 @@ use codex_config::MatcherGroup as CoreMatcherGroup;
 use codex_config::ResidencyRequirement as CoreResidencyRequirement;
 use codex_config::SandboxModeRequirement as CoreSandboxModeRequirement;
 use codex_core::ThreadManager;
+use codex_core::config::agent_roles::GlobalAgentRole;
+use codex_core::config::agent_roles::delete_global_agent_role;
+use codex_core::config::agent_roles::list_global_agent_roles;
+use codex_core::config::agent_roles::validate_global_agent_type;
+use codex_core::config::agent_roles::write_global_agent_role;
 use codex_features::canonical_feature_for_key;
 use codex_features::feature_for_key;
 use codex_model_provider::create_model_provider;
 use codex_plugin::PluginId;
 use codex_protocol::config_types::WebSearchMode;
+use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -117,6 +132,65 @@ impl ConfigRequestProcessor {
             .map(map_requirements_toml_to_api);
 
         Ok(ConfigRequirementsReadResponse { requirements })
+    }
+
+    pub(crate) async fn agent_role_list(
+        &self,
+        _params: AgentRoleListParams,
+    ) -> Result<AgentRoleListResponse, JSONRPCErrorError> {
+        let roles = list_global_agent_roles(self.config_manager.codex_home())
+            .await
+            .map_err(map_agent_role_error)?
+            .into_iter()
+            .map(agent_role_to_api)
+            .collect();
+        Ok(AgentRoleListResponse { data: roles })
+    }
+
+    pub(crate) async fn agent_role_write(
+        &self,
+        params: AgentRoleWriteParams,
+    ) -> Result<AgentRoleWriteResponse, JSONRPCErrorError> {
+        let role = agent_role_from_api(params.role);
+        let agent_type = role.agent_type.clone();
+        validate_global_agent_type(&agent_type).map_err(map_agent_role_error)?;
+
+        let previous_route = self.clear_agent_model_route(&agent_type).await?;
+        let result = write_global_agent_role(self.config_manager.codex_home(), role).await;
+        let role = match result {
+            Ok(role) => role,
+            Err(err) => {
+                self.restore_agent_model_route_after_failure(&agent_type, previous_route, &err)
+                    .await?;
+                return Err(map_agent_role_error(err));
+            }
+        };
+
+        self.handle_config_mutation().await;
+        self.reload_user_config().await;
+        Ok(AgentRoleWriteResponse {
+            role: agent_role_to_api(role),
+        })
+    }
+
+    pub(crate) async fn agent_role_delete(
+        &self,
+        params: AgentRoleDeleteParams,
+    ) -> Result<AgentRoleDeleteResponse, JSONRPCErrorError> {
+        let agent_type = params.agent_type;
+        validate_global_agent_type(&agent_type).map_err(map_agent_role_error)?;
+
+        let previous_route = self.clear_agent_model_route(&agent_type).await?;
+        let result = delete_global_agent_role(self.config_manager.codex_home(), &agent_type).await;
+        if let Err(err) = result {
+            self.restore_agent_model_route_after_failure(&agent_type, previous_route, &err)
+                .await?;
+            return Err(map_agent_role_error(err));
+        }
+
+        self.handle_config_mutation().await;
+        self.reload_user_config().await;
+        Ok(AgentRoleDeleteResponse {})
     }
 
     pub(crate) async fn value_write(
@@ -234,6 +308,96 @@ impl ConfigRequestProcessor {
         Ok(response)
     }
 
+    async fn clear_agent_model_route(
+        &self,
+        agent_type: &str,
+    ) -> Result<Option<JsonValue>, JSONRPCErrorError> {
+        let previous_route = self.read_user_agent_model_route(agent_type).await?;
+        self.write_agent_model_route(agent_type, JsonValue::Null)
+            .await?;
+        Ok(previous_route)
+    }
+
+    async fn read_user_agent_model_route(
+        &self,
+        agent_type: &str,
+    ) -> Result<Option<JsonValue>, JSONRPCErrorError> {
+        let user_config_path = self
+            .config_manager
+            .user_config_path()
+            .map_err(|err| internal_error(format!("failed to resolve user config path: {err}")))?;
+        let contents = match tokio::fs::read_to_string(user_config_path.as_path()).await {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(internal_error(format!(
+                    "failed to read user config for agent role route cleanup: {err}"
+                )));
+            }
+        };
+        let user_config: toml::Value = toml::from_str(&contents).map_err(|err| {
+            invalid_request(format!(
+                "failed to parse user config for agent role route cleanup: {err}"
+            ))
+        })?;
+        let Some(route) = user_config
+            .get("agents")
+            .and_then(|agents| agents.get("model_routing"))
+            .and_then(|model_routing| model_routing.get("routes"))
+            .and_then(|routes| routes.get(agent_type))
+        else {
+            return Ok(None);
+        };
+
+        serde_json::to_value(route).map(Some).map_err(|err| {
+            internal_error(format!(
+                "failed to serialize legacy agent model route `{agent_type}`: {err}"
+            ))
+        })
+    }
+
+    async fn write_agent_model_route(
+        &self,
+        agent_type: &str,
+        value: JsonValue,
+    ) -> Result<(), JSONRPCErrorError> {
+        self.config_manager
+            .batch_write(ConfigBatchWriteParams {
+                edits: vec![ConfigEdit {
+                    key_path: format!("agents.model_routing.routes.{agent_type}"),
+                    value,
+                    merge_strategy: MergeStrategy::Replace,
+                }],
+                file_path: None,
+                expected_version: None,
+                reload_user_config: false,
+            })
+            .await
+            .map_err(map_error)?;
+        Ok(())
+    }
+
+    async fn restore_agent_model_route_after_failure(
+        &self,
+        agent_type: &str,
+        previous_route: Option<JsonValue>,
+        failure: &std::io::Error,
+    ) -> Result<(), JSONRPCErrorError> {
+        let Some(previous_route) = previous_route else {
+            return Ok(());
+        };
+        if let Err(rollback_err) = self
+            .write_agent_model_route(agent_type, previous_route)
+            .await
+        {
+            return Err(internal_error(format!(
+                "agent role mutation failed: {failure}; additionally failed to restore legacy agent model route `{agent_type}`: {}",
+                rollback_err.message
+            )));
+        }
+        Ok(())
+    }
+
     async fn set_experimental_feature_enablement(
         &self,
         params: ExperimentalFeatureEnablementSetParams,
@@ -309,6 +473,24 @@ impl ConfigRequestProcessor {
                 self.analytics_events_client.track_plugin_disabled(metadata);
             }
         }
+    }
+}
+
+fn agent_role_to_api(role: GlobalAgentRole) -> AgentRole {
+    AgentRole {
+        agent_type: role.agent_type,
+        description: role.description,
+        developer_instructions: role.developer_instructions,
+        model: role.model,
+    }
+}
+
+fn agent_role_from_api(role: AgentRole) -> GlobalAgentRole {
+    GlobalAgentRole {
+        agent_type: role.agent_type,
+        description: role.description,
+        developer_instructions: role.developer_instructions,
+        model: role.model,
     }
 }
 
@@ -552,6 +734,15 @@ fn map_error(err: ConfigManagerError) -> JSONRPCErrorError {
     }
 
     internal_error(err.to_string())
+}
+
+fn map_agent_role_error(err: std::io::Error) -> JSONRPCErrorError {
+    match err.kind() {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+            invalid_request(err.to_string())
+        }
+        _ => internal_error(err.to_string()),
+    }
 }
 
 fn config_write_error(code: ConfigWriteErrorCode, message: impl Into<String>) -> JSONRPCErrorError {

@@ -1,4 +1,5 @@
 use super::AgentRoleConfig;
+use crate::path_utils::write_atomically;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::config_toml::AgentRoleToml;
@@ -11,10 +12,225 @@ use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+use tokio::task;
 use toml::Value as TomlValue;
+use toml_edit::DocumentMut;
+use toml_edit::value;
+
+const RESERVED_GLOBAL_AGENT_TYPES: &[&str] = &["default", "explorer", "worker"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalAgentRole {
+    pub agent_type: String,
+    pub description: String,
+    pub developer_instructions: String,
+    pub model: String,
+}
+
+pub fn validate_global_agent_type(agent_type: &str) -> std::io::Result<()> {
+    let mut chars = agent_type.chars();
+    let valid = matches!(chars.next(), Some(ch) if ch.is_ascii_lowercase())
+        && chars.clone().count() <= 31
+        && !chars.clone().next().is_none()
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-');
+
+    if !valid {
+        return Err(invalid_agent_role_input(
+            "agentType must match ^[a-z][a-z0-9_-]{1,31}$",
+        ));
+    }
+
+    if RESERVED_GLOBAL_AGENT_TYPES.contains(&agent_type) {
+        return Err(invalid_agent_role_input(format!(
+            "agentType `{agent_type}` is reserved"
+        )));
+    }
+
+    Ok(())
+}
+
+pub async fn list_global_agent_roles(codex_home: &Path) -> std::io::Result<Vec<GlobalAgentRole>> {
+    let agents_dir = global_agents_dir(codex_home);
+    let mut entries = match tokio::fs::read_dir(&agents_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+
+    let mut roles = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
+        {
+            continue;
+        }
+
+        let contents = tokio::fs::read_to_string(&path).await?;
+        match global_agent_role_from_file_contents(&contents, &path, &agents_dir) {
+            Ok(role) => roles.push(role),
+            Err(err) => {
+                tracing::warn!(
+                    "ignoring malformed global agent role file {}: {err}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    roles.sort_by(|left, right| left.agent_type.cmp(&right.agent_type));
+    Ok(roles)
+}
+
+pub async fn write_global_agent_role(
+    codex_home: &Path,
+    role: GlobalAgentRole,
+) -> std::io::Result<GlobalAgentRole> {
+    let role = normalize_global_agent_role(role)?;
+    let path = global_agent_role_path(codex_home, &role.agent_type)?;
+    let agents_dir = global_agents_dir(codex_home);
+
+    let mut document = match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => {
+            parse_agent_role_file_contents(&contents, &path, &agents_dir, None)?;
+            contents.parse::<DocumentMut>().map_err(|err| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "failed to parse existing agent role file at {}: {err}",
+                        path.display()
+                    ),
+                )
+            })?
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => DocumentMut::new(),
+        Err(err) => return Err(err),
+    };
+
+    document["name"] = value(role.agent_type.clone());
+    document["description"] = value(role.description.clone());
+    document["developer_instructions"] = value(role.developer_instructions.clone());
+    document["model"] = value(role.model.clone());
+
+    let contents = document.to_string();
+    let parsed_role = global_agent_role_from_file_contents(&contents, &path, &agents_dir)?;
+    if parsed_role.agent_type != role.agent_type {
+        return Err(invalid_agent_role_input(format!(
+            "agent role file at {} resolved to `{}` instead of `{}`",
+            path.display(),
+            parsed_role.agent_type,
+            role.agent_type
+        )));
+    }
+
+    task::spawn_blocking({
+        let path = path.clone();
+        move || write_atomically(&path, &contents)
+    })
+    .await
+    .map_err(|err| {
+        io::Error::new(
+            ErrorKind::Other,
+            format!("failed to write agent role: {err}"),
+        )
+    })??;
+
+    Ok(parsed_role)
+}
+
+pub async fn delete_global_agent_role(codex_home: &Path, agent_type: &str) -> std::io::Result<()> {
+    let path = global_agent_role_path(codex_home, agent_type)?;
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn global_agents_dir(codex_home: &Path) -> PathBuf {
+    codex_home.join("agents")
+}
+
+fn global_agent_role_path(codex_home: &Path, agent_type: &str) -> std::io::Result<PathBuf> {
+    validate_global_agent_type(agent_type)?;
+    Ok(global_agents_dir(codex_home).join(format!("{agent_type}.toml")))
+}
+
+fn normalize_global_agent_role(role: GlobalAgentRole) -> std::io::Result<GlobalAgentRole> {
+    validate_global_agent_type(&role.agent_type)?;
+    Ok(GlobalAgentRole {
+        agent_type: role.agent_type,
+        description: required_global_agent_role_field("description", role.description)?,
+        developer_instructions: required_global_agent_role_field(
+            "developerInstructions",
+            role.developer_instructions,
+        )?,
+        model: required_global_agent_role_field("model", role.model)?,
+    })
+}
+
+fn required_global_agent_role_field(field_name: &str, value: String) -> std::io::Result<String> {
+    let normalized = value.trim().to_string();
+    if normalized.is_empty() {
+        return Err(invalid_agent_role_input(format!(
+            "{field_name} must be a non-empty string"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn global_agent_role_from_file_contents(
+    contents: &str,
+    role_file_label: &Path,
+    agents_dir: &Path,
+) -> std::io::Result<GlobalAgentRole> {
+    let parsed = parse_agent_role_file_contents(contents, role_file_label, agents_dir, None)?;
+    validate_global_agent_type(&parsed.role_name)?;
+    let description = parsed.description.ok_or_else(|| {
+        invalid_agent_role_input(format!(
+            "agent role file at {} must define `description`",
+            role_file_label.display()
+        ))
+    })?;
+    let developer_instructions =
+        required_config_string(&parsed.config, "developer_instructions", role_file_label)?;
+    let model = required_config_string(&parsed.config, "model", role_file_label)?;
+
+    Ok(GlobalAgentRole {
+        agent_type: parsed.role_name,
+        description,
+        developer_instructions,
+        model,
+    })
+}
+
+fn required_config_string(
+    config: &TomlValue,
+    key: &str,
+    role_file_label: &Path,
+) -> std::io::Result<String> {
+    let Some(value) = config.get(key).and_then(TomlValue::as_str) else {
+        return Err(invalid_agent_role_input(format!(
+            "agent role file at {} must define `{key}`",
+            role_file_label.display()
+        )));
+    };
+    required_global_agent_role_field(key, value.to_string())
+}
+
+fn invalid_agent_role_input(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(ErrorKind::InvalidInput, message.into())
+}
 
 pub(crate) async fn load_agent_roles(
     fs: &dyn ExecutorFileSystem,
@@ -551,4 +767,121 @@ async fn collect_agent_role_files(
 
     files.sort();
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn write_global_agent_role_preserves_additional_config_keys() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let agents_dir = codex_home.path().join("agents");
+        std::fs::create_dir_all(&agents_dir)?;
+        std::fs::write(
+            agents_dir.join("researcher.toml"),
+            r#"
+name = "researcher"
+description = "Old description"
+developer_instructions = "Old instructions"
+model = "gpt-old"
+service_tier = "priority"
+"#,
+        )?;
+
+        let role = write_global_agent_role(
+            codex_home.path(),
+            GlobalAgentRole {
+                agent_type: "researcher".to_string(),
+                description: "Research helper".to_string(),
+                developer_instructions: "Use primary sources.".to_string(),
+                model: "gpt-5.6-terra".to_string(),
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            role,
+            GlobalAgentRole {
+                agent_type: "researcher".to_string(),
+                description: "Research helper".to_string(),
+                developer_instructions: "Use primary sources.".to_string(),
+                model: "gpt-5.6-terra".to_string(),
+            }
+        );
+        let contents = std::fs::read_to_string(agents_dir.join("researcher.toml"))?;
+        let role_file: TomlValue = toml::from_str(&contents).expect("role file parses");
+        assert_eq!(
+            role_file.get("service_tier").and_then(TomlValue::as_str),
+            Some("priority")
+        );
+        assert_eq!(
+            role_file.get("description").and_then(TomlValue::as_str),
+            Some("Research helper")
+        );
+        assert_eq!(
+            role_file
+                .get("developer_instructions")
+                .and_then(TomlValue::as_str),
+            Some("Use primary sources.")
+        );
+        assert_eq!(
+            role_file.get("model").and_then(TomlValue::as_str),
+            Some("gpt-5.6-terra")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_global_agent_roles_reads_parseable_owned_files() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let agents_dir = codex_home.path().join("agents");
+        std::fs::create_dir_all(&agents_dir)?;
+        std::fs::write(
+            agents_dir.join("researcher.toml"),
+            r#"
+name = "researcher"
+description = "Research helper"
+developer_instructions = "Use primary sources."
+model = "gpt-5.6-terra"
+"#,
+        )?;
+        std::fs::write(agents_dir.join("malformed.toml"), "name = [\n")?;
+        std::fs::write(
+            agents_dir.join("default.toml"),
+            r#"
+name = "default"
+description = "Reserved role"
+developer_instructions = "Reserved."
+model = "gpt-5.6-terra"
+"#,
+        )?;
+
+        let roles = list_global_agent_roles(codex_home.path()).await?;
+
+        assert_eq!(
+            roles,
+            vec![GlobalAgentRole {
+                agent_type: "researcher".to_string(),
+                description: "Research helper".to_string(),
+                developer_instructions: "Use primary sources.".to_string(),
+                model: "gpt-5.6-terra".to_string(),
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn global_agent_role_rejects_reserved_or_unsafe_type() {
+        assert!(validate_global_agent_type("default").is_err());
+        assert!(validate_global_agent_type("a").is_err());
+        assert!(validate_global_agent_type("Researcher").is_err());
+        assert!(validate_global_agent_type("researcher.toml").is_err());
+        assert!(validate_global_agent_type("researcher").is_ok());
+        assert!(validate_global_agent_type("researcher_2-fast").is_ok());
+    }
 }

@@ -142,7 +142,7 @@ use codex_network_proxy::NetworkProxyConfig;
 use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
-pub(crate) mod agent_roles;
+pub mod agent_roles;
 mod auth_keyring;
 pub mod edit;
 mod managed_features;

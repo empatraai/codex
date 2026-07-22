@@ -63,6 +63,41 @@ fn test_absolute_path() -> AbsolutePathBuf {
 }
 
 #[test]
+fn agent_role_rpc_payloads_use_camel_case_fields() {
+    let write_params = AgentRoleWriteParams {
+        role: AgentRole {
+            agent_type: "researcher".to_string(),
+            description: "Research helper".to_string(),
+            developer_instructions: "Use primary sources.".to_string(),
+            model: "gpt-5.6-terra".to_string(),
+        },
+    };
+
+    let value = serde_json::to_value(&write_params).expect("serialize agent role write params");
+    assert_eq!(
+        value,
+        json!({
+            "role": {
+                "agentType": "researcher",
+                "description": "Research helper",
+                "developerInstructions": "Use primary sources.",
+                "model": "gpt-5.6-terra",
+            }
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<AgentRoleWriteParams>(value).expect("deserialize write params"),
+        write_params
+    );
+
+    let delete_params = serde_json::from_value::<AgentRoleDeleteParams>(json!({
+        "agentType": "researcher"
+    }))
+    .expect("deserialize delete params");
+    assert_eq!(delete_params.agent_type, "researcher");
+}
+
+#[test]
 fn thread_sources_round_trip_as_scalar_labels() {
     for (source, label) in [
         (ThreadSource::User, "user"),

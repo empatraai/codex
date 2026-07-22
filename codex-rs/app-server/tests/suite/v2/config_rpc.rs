@@ -3,6 +3,13 @@ use app_test_support::TestAppServer;
 use app_test_support::test_path_buf_with_windows;
 use app_test_support::test_tmp_path_buf;
 use app_test_support::to_response;
+use codex_app_server_protocol::AgentRole;
+use codex_app_server_protocol::AgentRoleDeleteParams;
+use codex_app_server_protocol::AgentRoleDeleteResponse;
+use codex_app_server_protocol::AgentRoleListParams;
+use codex_app_server_protocol::AgentRoleListResponse;
+use codex_app_server_protocol::AgentRoleWriteParams;
+use codex_app_server_protocol::AgentRoleWriteResponse;
 use codex_app_server_protocol::AppConfig;
 use codex_app_server_protocol::AppToolApproval;
 use codex_app_server_protocol::ApprovalsReviewer;
@@ -46,6 +53,125 @@ fn write_config(codex_home: &TempDir, contents: &str) -> Result<()> {
         codex_home.path().join("config.toml"),
         contents,
     )?)
+}
+
+fn read_config_toml(codex_home: &TempDir) -> Result<toml::Value> {
+    Ok(toml::from_str(&std::fs::read_to_string(
+        codex_home.path().join("config.toml"),
+    )?)?)
+}
+
+fn legacy_agent_model_route<'a>(
+    config: &'a toml::Value,
+    agent_type: &str,
+) -> Option<&'a toml::Value> {
+    config
+        .get("agents")
+        .and_then(|agents| agents.get("model_routing"))
+        .and_then(|model_routing| model_routing.get("routes"))
+        .and_then(|routes| routes.get(agent_type))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_role_write_creates_role_file_lists_role_and_clears_legacy_route() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_config(
+        &codex_home,
+        r#"
+[agents.model_routing.routes.researcher]
+candidates = [{ model = "gpt-route" }]
+"#,
+    )?;
+    let role = AgentRole {
+        agent_type: "researcher".to_string(),
+        description: "Research helper".to_string(),
+        developer_instructions: "Use primary sources.".to_string(),
+        model: "gpt-5.6-terra".to_string(),
+    };
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let write_id = mcp
+        .send_agent_role_write_request(AgentRoleWriteParams { role: role.clone() })
+        .await?;
+    let write_resp = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(write_id)),
+    )
+    .await??;
+    let write: AgentRoleWriteResponse = to_response(write_resp)?;
+    assert_eq!(write.role, role);
+
+    let role_path = codex_home.path().join("agents").join("researcher.toml");
+    let role_file: toml::Value = toml::from_str(&std::fs::read_to_string(&role_path)?)?;
+    assert_eq!(
+        role_file.get("model").and_then(toml::Value::as_str),
+        Some("gpt-5.6-terra")
+    );
+    assert!(
+        legacy_agent_model_route(&read_config_toml(&codex_home)?, "researcher").is_none(),
+        "agentRole/write should remove the legacy model routing route"
+    );
+
+    let list_id = mcp
+        .send_agent_role_list_request(AgentRoleListParams {})
+        .await?;
+    let list_resp = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+    )
+    .await??;
+    let list: AgentRoleListResponse = to_response(list_resp)?;
+    assert_eq!(list.data, vec![role]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_role_delete_removes_role_file_and_clears_legacy_route() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_config(
+        &codex_home,
+        r#"
+[agents.model_routing.routes.researcher]
+candidates = [{ model = "gpt-route" }]
+"#,
+    )?;
+    let agents_dir = codex_home.path().join("agents");
+    std::fs::create_dir_all(&agents_dir)?;
+    let role_path = agents_dir.join("researcher.toml");
+    std::fs::write(
+        &role_path,
+        r#"
+name = "researcher"
+description = "Research helper"
+developer_instructions = "Use primary sources."
+model = "gpt-5.6-terra"
+"#,
+    )?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let delete_id = mcp
+        .send_agent_role_delete_request(AgentRoleDeleteParams {
+            agent_type: "researcher".to_string(),
+        })
+        .await?;
+    let delete_resp = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(delete_id)),
+    )
+    .await??;
+    let delete: AgentRoleDeleteResponse = to_response(delete_resp)?;
+    assert_eq!(delete, AgentRoleDeleteResponse {});
+    assert!(!role_path.exists());
+    assert!(
+        legacy_agent_model_route(&read_config_toml(&codex_home)?, "researcher").is_none(),
+        "agentRole/delete should remove the legacy model routing route"
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
