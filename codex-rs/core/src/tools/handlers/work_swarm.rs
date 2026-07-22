@@ -1921,6 +1921,12 @@ async fn emit_work_swarm_progress(
     let Ok((Some(run), tasks, _, messages, _)) = db.load_swarm_recovery_data(run_id).await else {
         return;
     };
+    let Ok(attempt_thread_ids) = db
+        .list_latest_swarm_attempt_thread_ids_by_task(run_id)
+        .await
+    else {
+        return;
+    };
     let task = task_id
         .and_then(|task_id| tasks.iter().find(|task| task.id == task_id))
         .cloned();
@@ -1932,7 +1938,7 @@ async fn emit_work_swarm_progress(
         .map(str::to_string);
     let agent_path = if let Some(thread_id) = task
         .as_ref()
-        .and_then(|task| task.assigned_thread_id.as_deref())
+        .and_then(|task| work_swarm_task_agent_thread_id(task, &attempt_thread_ids))
         .and_then(|value| ThreadId::from_string(value).ok())
     {
         session
@@ -1993,9 +1999,8 @@ async fn emit_work_swarm_progress(
     let task_snapshots = tasks
         .iter()
         .map(|task| {
-            let agent_path = task
-                .assigned_thread_id
-                .as_deref()
+            let agent_thread_id = work_swarm_task_agent_thread_id(task, &attempt_thread_ids);
+            let agent_path = agent_thread_id
                 .and_then(|value| ThreadId::from_string(value).ok())
                 .and_then(|thread_id| session.services.agent_control.get_agent_metadata(thread_id))
                 .and_then(|metadata| metadata.agent_path)
@@ -2038,7 +2043,7 @@ async fn emit_work_swarm_progress(
                     .map(str::to_string),
                 fallback_reason: task.fallback_reason.clone(),
                 agent_path,
-                agent_thread_id: task.assigned_thread_id.clone(),
+                agent_thread_id: agent_thread_id.map(str::to_string),
                 error: task.last_error.clone(),
             }
         })
@@ -2093,13 +2098,17 @@ async fn emit_work_swarm_progress(
             let sender_task_id = tasks
                 .iter()
                 .find(|task| {
-                    task.assigned_thread_id.as_deref() == Some(message.sender_thread_id.as_str())
+                    work_swarm_task_agent_thread_id(task, &attempt_thread_ids)
+                        == Some(message.sender_thread_id.as_str())
                 })
                 .map(|task| local_task_id(run_id, task.id.as_str()).to_string());
             let recipient_task_id = message.target_thread_id.as_deref().and_then(|thread_id| {
                 tasks
                     .iter()
-                    .find(|task| task.assigned_thread_id.as_deref() == Some(thread_id))
+                    .find(|task| {
+                        work_swarm_task_agent_thread_id(task, &attempt_thread_ids)
+                            == Some(thread_id)
+                    })
                     .map(|task| local_task_id(run_id, task.id.as_str()).to_string())
             });
             Some(TurnWorkSwarmCommunicationMessage {
@@ -2193,6 +2202,25 @@ async fn emit_work_swarm_progress(
     } else {
         session.emit_turn_item_started(turn, &item).await;
     }
+}
+
+fn work_swarm_task_agent_thread_id<'a>(
+    task: &'a SwarmTask,
+    attempt_thread_ids: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    task.assigned_thread_id
+        .as_deref()
+        .filter(|thread_id| is_displayable_swarm_attempt_thread_id(thread_id))
+        .or_else(|| {
+            attempt_thread_ids
+                .get(task.id.as_str())
+                .map(String::as_str)
+                .filter(|thread_id| is_displayable_swarm_attempt_thread_id(thread_id))
+        })
+}
+
+fn is_displayable_swarm_attempt_thread_id(thread_id: &str) -> bool {
+    !thread_id.starts_with("pending:") && !thread_id.starts_with("unstarted:")
 }
 
 async fn shutdown_running_work_swarm_children(session: &Session, run_id: &str) {
@@ -2496,5 +2524,91 @@ mod tests {
         assert!(is_work_swarm_worker_source(&worker));
         assert!(!is_work_swarm_worker_source(&ordinary));
         assert!(!is_work_swarm_worker_source(&SessionSource::Exec));
+    }
+
+    #[test]
+    fn task_progress_thread_id_falls_back_to_latest_attempt_thread() {
+        let task = test_swarm_task("run:task", SwarmTaskStatus::Completed, None);
+        let attempt_thread_ids = BTreeMap::from([(
+            "run:task".to_string(),
+            "00000000-0000-4000-8000-000000000001".to_string(),
+        )]);
+
+        assert_eq!(
+            work_swarm_task_agent_thread_id(&task, &attempt_thread_ids),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn task_progress_thread_id_keeps_live_assignment_while_running() {
+        let task = test_swarm_task(
+            "run:task",
+            SwarmTaskStatus::Running,
+            Some("00000000-0000-4000-8000-000000000002"),
+        );
+        let attempt_thread_ids = BTreeMap::from([(
+            "run:task".to_string(),
+            "00000000-0000-4000-8000-000000000001".to_string(),
+        )]);
+
+        assert_eq!(
+            work_swarm_task_agent_thread_id(&task, &attempt_thread_ids),
+            Some("00000000-0000-4000-8000-000000000002")
+        );
+    }
+
+    #[test]
+    fn task_progress_thread_id_does_not_surface_provisional_attempt_threads() {
+        let task = test_swarm_task(
+            "run:task",
+            SwarmTaskStatus::Running,
+            Some("pending:run:task"),
+        );
+        let attempt_thread_ids =
+            BTreeMap::from([("run:task".to_string(), "unstarted:run:task".to_string())]);
+
+        assert_eq!(
+            work_swarm_task_agent_thread_id(&task, &attempt_thread_ids),
+            None
+        );
+    }
+
+    fn test_swarm_task(
+        id: &str,
+        status: SwarmTaskStatus,
+        assigned_thread_id: Option<&str>,
+    ) -> SwarmTask {
+        let now = Utc::now();
+        SwarmTask {
+            id: id.to_string(),
+            run_id: "run".to_string(),
+            thread_id: "thread-root".to_string(),
+            assigned_thread_id: assigned_thread_id.map(str::to_string),
+            order_index: 0,
+            depends_on_task_ids: Vec::new(),
+            task_kind: "worker".to_string(),
+            agent_type: Some("worker".to_string()),
+            instructions: Some("work".to_string()),
+            result_token: "result-token".to_string(),
+            status,
+            model_candidate_json: None,
+            model_route_json: None,
+            candidate_index: Some(0),
+            fallback_reason: None,
+            lease_owner: None,
+            lease_until: None,
+            max_attempts: 3,
+            attempt_count: 1,
+            token_usage: 0,
+            runtime_usage_seconds: 0,
+            deadline_at: None,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            last_error: None,
+            result_json: None,
+        }
     }
 }

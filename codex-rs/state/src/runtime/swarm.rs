@@ -9,6 +9,7 @@ use anyhow::anyhow;
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::Row;
+use std::collections::BTreeMap;
 
 fn to_json<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
     Ok(serde_json::to_string(value)?)
@@ -249,6 +250,43 @@ INSERT INTO swarm_tasks (
             .fetch_optional(self.pool.as_ref())
             .await?;
         row.map(SwarmAttempt::try_from).transpose()
+    }
+
+    pub async fn list_latest_swarm_attempt_thread_ids_by_task(
+        &self,
+        run_id: &str,
+    ) -> anyhow::Result<BTreeMap<String, String>> {
+        let rows = sqlx::query(
+            r#"
+SELECT task_id, thread_id
+FROM (
+    SELECT
+        task_id,
+        thread_id,
+        ROW_NUMBER() OVER (
+            PARTITION BY task_id
+            ORDER BY created_at DESC, updated_at DESC, rowid DESC
+        ) AS attempt_rank
+    FROM swarm_attempts
+    WHERE run_id = ?
+      AND thread_id NOT LIKE 'pending:%'
+      AND thread_id NOT LIKE 'unstarted:%'
+)
+WHERE attempt_rank = 1
+ORDER BY task_id ASC
+            "#,
+        )
+        .bind(run_id)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("task_id")?,
+                    row.try_get::<String, _>("thread_id")?,
+                ))
+            })
+            .collect()
     }
 
     pub async fn get_swarm_run_progress(&self, run_id: &str) -> anyhow::Result<SwarmRunProgress> {
@@ -2000,6 +2038,13 @@ mod tests {
             .expect("attempt exists");
         assert_eq!(attempt.status, SwarmAttemptStatus::Succeeded);
         assert_eq!(attempt.token_usage, 17);
+        let attempt_thread_ids = runtime
+            .list_latest_swarm_attempt_thread_ids_by_task("report-run")
+            .await?;
+        assert_eq!(
+            attempt_thread_ids.get("report-task").map(String::as_str),
+            Some("thread-worker")
+        );
         let run = runtime
             .get_swarm_run("report-run")
             .await?
@@ -2056,6 +2101,119 @@ mod tests {
             .await?;
         assert!(!second.cancelled);
         assert!(second.worker_thread_ids.is_empty());
+        runtime.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn latest_attempt_thread_tracks_real_retry_attempts() -> anyhow::Result<()> {
+        let runtime = test_runtime().await?;
+        let first_attempt_id = create_active_worker_attempt(
+            runtime.as_ref(),
+            "retry-run",
+            "retry-task",
+            "thread-worker-1",
+            3,
+        )
+        .await?;
+
+        assert!(
+            runtime
+                .finalize_swarm_worker_report(
+                    first_attempt_id.as_str(),
+                    "retry-task",
+                    SwarmTaskAttemptDisposition::Retryable,
+                    7,
+                    2,
+                    Some(&serde_json::json!({"retry": true})),
+                    Some("try again"),
+                )
+                .await?
+        );
+        let retryable = runtime
+            .get_swarm_task("retry-task")
+            .await?
+            .expect("task exists");
+        assert_eq!(retryable.status, SwarmTaskStatus::Retryable);
+        assert_eq!(retryable.assigned_thread_id, None);
+        let first_thread_ids = runtime
+            .list_latest_swarm_attempt_thread_ids_by_task("retry-run")
+            .await?;
+        assert_eq!(
+            first_thread_ids.get("retry-task").map(String::as_str),
+            Some("thread-worker-1")
+        );
+
+        let claimed = runtime
+            .claim_ready_swarm_task("retry-run", "lease-owner-2", 30)
+            .await?
+            .expect("task should be retryable");
+        assert_eq!(claimed.attempt_count, 2);
+        let second_attempt_id = "retry-task:attempt:2";
+        runtime
+            .record_swarm_attempt_start(
+                second_attempt_id,
+                "retry-run",
+                "retry-task",
+                "pending:retry-task",
+                Some("lease-owner-2"),
+                Some(30),
+                None,
+                None,
+            )
+            .await?;
+        let pending_thread_ids = runtime
+            .list_latest_swarm_attempt_thread_ids_by_task("retry-run")
+            .await?;
+        assert_eq!(
+            pending_thread_ids.get("retry-task").map(String::as_str),
+            Some("thread-worker-1")
+        );
+
+        assert!(
+            runtime
+                .bind_swarm_attempt_thread(second_attempt_id, "lease-owner-2", "thread-worker-2")
+                .await?
+        );
+        assert!(
+            runtime
+                .bind_swarm_task_thread("retry-task", "lease-owner-2", "thread-worker-2")
+                .await?
+        );
+        let running_thread_ids = runtime
+            .list_latest_swarm_attempt_thread_ids_by_task("retry-run")
+            .await?;
+        assert_eq!(
+            running_thread_ids.get("retry-task").map(String::as_str),
+            Some("thread-worker-2")
+        );
+
+        assert!(
+            runtime
+                .finalize_swarm_worker_report(
+                    second_attempt_id,
+                    "retry-task",
+                    SwarmTaskAttemptDisposition::Succeeded,
+                    11,
+                    3,
+                    Some(&serde_json::json!({"done": true})),
+                    None,
+                )
+                .await?
+        );
+        let completed = runtime
+            .get_swarm_task("retry-task")
+            .await?
+            .expect("task exists");
+        assert_eq!(completed.status, SwarmTaskStatus::Completed);
+        assert_eq!(completed.assigned_thread_id, None);
+        let completed_thread_ids = runtime
+            .list_latest_swarm_attempt_thread_ids_by_task("retry-run")
+            .await?;
+        assert_eq!(
+            completed_thread_ids.get("retry-task").map(String::as_str),
+            Some("thread-worker-2")
+        );
         runtime.close().await;
         Ok(())
     }
