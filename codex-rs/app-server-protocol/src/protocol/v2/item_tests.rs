@@ -12,6 +12,9 @@ use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
 use codex_protocol::protocol::TurnWorkSwarmCommunicationProgress as CoreTurnWorkSwarmCommunicationProgress;
 use codex_protocol::protocol::TurnWorkSwarmProgressStatus as CoreTurnWorkSwarmProgressStatus;
+use codex_protocol::protocol::TurnWorkSwarmTaskKind as CoreTurnWorkSwarmTaskKind;
+use codex_protocol::protocol::TurnWorkSwarmTaskProgress as CoreTurnWorkSwarmTaskProgress;
+use codex_protocol::protocol::TurnWorkSwarmTaskStatus as CoreTurnWorkSwarmTaskStatus;
 use codex_protocol::protocol::WorkSwarmProgress;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
@@ -110,7 +113,23 @@ fn converts_work_swarm_activity_into_thread_item() {
             model: Some("gpt-test".to_string()),
             fallback_reason: None,
             error: None,
-            tasks: Vec::new(),
+            tasks: vec![CoreTurnWorkSwarmTaskProgress {
+                id: "research".to_string(),
+                task_title: Some("Research release risks".to_string()),
+                kind: CoreTurnWorkSwarmTaskKind::Worker,
+                specialist: Some("explorer".to_string()),
+                status: CoreTurnWorkSwarmTaskStatus::Running,
+                summary: Some("Inspect the release path".to_string()),
+                depends_on: Vec::new(),
+                attempt: 1,
+                max_attempts: 1,
+                tokens_used: 10,
+                model: Some("gpt-test".to_string()),
+                fallback_reason: None,
+                agent_path: Some("/root/research".to_string()),
+                agent_thread_id: Some("thread-agent-1".to_string()),
+                error: None,
+            }],
             communication: CoreTurnWorkSwarmCommunicationProgress {
                 queued: 0,
                 delivered: 0,
@@ -132,6 +151,7 @@ fn converts_work_swarm_activity_into_thread_item() {
         running,
         succeeded,
         model,
+        tasks,
         ..
     } = item
     else {
@@ -142,4 +162,5 @@ fn converts_work_swarm_activity_into_thread_item() {
     assert_eq!(running, 1);
     assert_eq!(succeeded, 1);
     assert_eq!(model.as_deref(), Some("gpt-test"));
+    assert_eq!(tasks[0].agent_thread_id.as_deref(), Some("thread-agent-1"));
 }

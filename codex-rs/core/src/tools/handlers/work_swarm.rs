@@ -2038,6 +2038,7 @@ async fn emit_work_swarm_progress(
                     .map(str::to_string),
                 fallback_reason: task.fallback_reason.clone(),
                 agent_path,
+                agent_thread_id: task.assigned_thread_id.clone(),
                 error: task.last_error.clone(),
             }
         })

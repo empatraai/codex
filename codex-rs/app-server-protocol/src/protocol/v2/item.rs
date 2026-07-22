@@ -1075,6 +1075,7 @@ impl From<CoreTurnItem> for ThreadItem {
                             model: task.model,
                             fallback_reason: task.fallback_reason,
                             agent_path: task.agent_path,
+                            agent_thread_id: task.agent_thread_id,
                             error: task.error,
                         })
                         .collect(),

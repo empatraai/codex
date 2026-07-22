@@ -20671,6 +20671,12 @@
               "null"
             ]
           },
+          "agentThreadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "attempt": {
             "format": "int64",
             "type": "integer"
