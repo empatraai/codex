@@ -57,6 +57,7 @@ use crate::tools::handlers::work_swarm::ReportWorkSwarmResultHandler;
 use crate::tools::handlers::work_swarm::StartWorkSwarmHandler;
 use crate::tools::handlers::work_swarm::WaitWorkSwarmHandler;
 use crate::tools::handlers::work_swarm::work_swarm_skill_available;
+use crate::tools::handlers::work_swarm_spec::StartWorkSwarmToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
 use crate::tools::hosted_spec::create_web_search_tool;
@@ -824,7 +825,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                     multi_agent_v2_handler(
                         SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
                             available_models: turn_context.available_models.clone(),
-                            agent_type_description,
+                            agent_type_description: agent_type_description.clone(),
                             expose_agent_type: !turn_context.config.agent_roles.is_empty(),
                             hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
                             expose_spawn_agent_model_overrides: turn_context
@@ -869,7 +870,15 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             if is_root_orchestrator && !is_work_swarm_worker {
                 if work_swarm_skill_available(turn_context) {
                     planned_tools.add_arc(override_tool_exposure(
-                        multi_agent_v2_handler(StartWorkSwarmHandler, tool_namespace),
+                        multi_agent_v2_handler(
+                            StartWorkSwarmHandler::new(StartWorkSwarmToolOptions {
+                                available_agent_types: crate::agent::role::available_role_names(
+                                    &turn_context.config,
+                                ),
+                                agent_type_description,
+                            }),
+                            tool_namespace,
+                        ),
                         exposure,
                     ));
                 }

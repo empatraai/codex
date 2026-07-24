@@ -535,41 +535,53 @@ INSERT INTO swarm_checkpoints (
         lease_seconds: i64,
     ) -> anyhow::Result<Option<SwarmTask>> {
         let now = Utc::now().timestamp();
-        let mut tx = self.pool.begin().await?;
-        let row = sqlx::query(
+        let lease_until = now + lease_seconds.max(1);
+        let row = sqlx::query_as::<_, SwarmTaskRow>(
             r#"
-SELECT task.id
-FROM swarm_tasks AS task
-WHERE task.run_id = ?
-  AND task.status IN (?, ?, ?, ?)
-  AND task.attempt_count < task.max_attempts
-  AND (task.lease_until IS NULL OR task.lease_until <= ?)
-  AND NOT EXISTS (
-      SELECT 1
-      FROM swarm_tasks AS dep
-      WHERE dep.run_id = task.run_id
-        AND EXISTS (
-            SELECT 1
-            FROM json_each(task.depends_on_task_ids_json)
-            WHERE json_each.value = dep.id
-        )
-        AND dep.status <> ?
-  )
-  AND NOT EXISTS (
-      SELECT 1
-      FROM swarm_tasks AS dep
-      WHERE dep.run_id = task.run_id
-        AND EXISTS (
-            SELECT 1
-            FROM json_each(task.depends_on_task_ids_json)
-            WHERE json_each.value = dep.id
-        )
-        AND dep.status IN (?, ?)
-  )
-ORDER BY task.order_index ASC, task.id ASC
-LIMIT 1
+UPDATE swarm_tasks
+SET status = ?, lease_owner = ?, lease_until = ?,
+    attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?),
+    updated_at = ?, last_error = NULL
+WHERE id = (
+    SELECT task.id
+    FROM swarm_tasks AS task
+    WHERE task.run_id = ?
+      AND task.status IN (?, ?, ?, ?)
+      AND task.attempt_count < task.max_attempts
+      AND (task.lease_until IS NULL OR task.lease_until <= ?)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM swarm_tasks AS dep
+          WHERE dep.run_id = task.run_id
+            AND EXISTS (
+                SELECT 1
+                FROM json_each(task.depends_on_task_ids_json)
+                WHERE json_each.value = dep.id
+            )
+            AND dep.status <> ?
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM swarm_tasks AS dep
+          WHERE dep.run_id = task.run_id
+            AND EXISTS (
+                SELECT 1
+                FROM json_each(task.depends_on_task_ids_json)
+                WHERE json_each.value = dep.id
+            )
+            AND dep.status IN (?, ?)
+      )
+    ORDER BY task.order_index ASC, task.id ASC
+    LIMIT 1
+)
+RETURNING *
             "#,
         )
+        .bind(SwarmTaskStatus::Running.as_str())
+        .bind(lease_owner)
+        .bind(lease_until)
+        .bind(now)
+        .bind(now)
         .bind(run_id)
         .bind(SwarmTaskStatus::Pending.as_str())
         .bind(SwarmTaskStatus::Ready.as_str())
@@ -579,44 +591,9 @@ LIMIT 1
         .bind(SwarmTaskStatus::Completed.as_str())
         .bind(SwarmTaskStatus::Failed.as_str())
         .bind(SwarmTaskStatus::Cancelled.as_str())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(self.pool.as_ref())
         .await?;
-        let Some(row) = row else {
-            tx.commit().await?;
-            return Ok(None);
-        };
-        let task_id: String = row.try_get("id")?;
-        let lease_until = now + lease_seconds.max(1);
-        let result = sqlx::query(
-            r#"
-UPDATE swarm_tasks
-SET status = ?, lease_owner = ?, lease_until = ?,
-    attempt_count = attempt_count + 1, started_at = COALESCE(started_at, ?),
-    updated_at = ?, last_error = NULL
-WHERE id = ? AND run_id = ? AND status IN (?, ?, ?, ?)
-  AND attempt_count < max_attempts
-  AND (lease_until IS NULL OR lease_until <= ?)
-            "#,
-        )
-        .bind(SwarmTaskStatus::Running.as_str())
-        .bind(lease_owner)
-        .bind(lease_until)
-        .bind(now)
-        .bind(now)
-        .bind(task_id.as_str())
-        .bind(run_id)
-        .bind(SwarmTaskStatus::Pending.as_str())
-        .bind(SwarmTaskStatus::Ready.as_str())
-        .bind(SwarmTaskStatus::Retryable.as_str())
-        .bind(SwarmTaskStatus::Escalated.as_str())
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        if result.rows_affected() == 0 {
-            return Ok(None);
-        }
-        self.get_swarm_task(task_id.as_str()).await
+        row.map(SwarmTask::try_from).transpose()
     }
 
     pub async fn bind_swarm_task_thread(
@@ -1908,7 +1885,9 @@ WHERE id = ? AND status NOT IN (?, ?, ?, ?)
 mod tests {
     use super::*;
     use crate::runtime::test_support::unique_temp_dir;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
+    use tokio::sync::Barrier;
 
     async fn test_runtime() -> anyhow::Result<Arc<StateRuntime>> {
         StateRuntime::init(unique_temp_dir(), "test-provider".to_string()).await
@@ -2029,6 +2008,79 @@ mod tests {
             runtime.list_active_swarm_runs("thread-root").await?.len(),
             1
         );
+        runtime.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_swarm_task_claims_do_not_leak_sqlite_busy() -> anyhow::Result<()> {
+        const TASK_COUNT: usize = 16;
+
+        let runtime = test_runtime().await?;
+        let tasks = (0..TASK_COUNT)
+            .map(|index| SwarmTaskCreateParams {
+                id: format!("concurrent-task-{index}"),
+                run_id: "concurrent-claim-run".to_string(),
+                thread_id: "thread-root".to_string(),
+                assigned_thread_id: None,
+                order_index: index as i64,
+                depends_on_task_ids: Vec::new(),
+                task_kind: "worker".to_string(),
+                agent_type: Some("worker".to_string()),
+                instructions: Some("work".to_string()),
+                result_token: format!("result-token-{index}"),
+                model_candidate_json: None,
+                model_route_json: None,
+                candidate_index: Some(0),
+                fallback_reason: None,
+                max_attempts: 1,
+                deadline_at: None,
+            })
+            .collect::<Vec<_>>();
+        runtime
+            .create_runnable_swarm_run(
+                &SwarmRunCreateParams {
+                    id: "concurrent-claim-run".to_string(),
+                    thread_id: "thread-root".to_string(),
+                    title: None,
+                    spec_json: None,
+                    model_candidate_json: None,
+                    fallback_reason: None,
+                    max_concurrency: TASK_COUNT as i64,
+                    token_budget: None,
+                    runtime_budget_seconds: None,
+                    fail_fast: true,
+                    cancel_policy: Some("propagate".to_string()),
+                    deadline_at: None,
+                },
+                &tasks,
+            )
+            .await?;
+
+        let barrier = Arc::new(Barrier::new(TASK_COUNT));
+        let mut claims = Vec::with_capacity(TASK_COUNT);
+        for index in 0..TASK_COUNT {
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            claims.push(tokio::spawn(async move {
+                barrier.wait().await;
+                runtime
+                    .claim_ready_swarm_task(
+                        "concurrent-claim-run",
+                        format!("lease-owner-{index}").as_str(),
+                        30,
+                    )
+                    .await
+            }));
+        }
+
+        let mut claimed_ids = BTreeSet::new();
+        for claim in claims {
+            let task = claim.await??.expect("every ready task should be claimed");
+            assert!(claimed_ids.insert(task.id), "a task was claimed twice");
+        }
+        assert_eq!(claimed_ids.len(), TASK_COUNT);
+
         runtime.close().await;
         Ok(())
     }

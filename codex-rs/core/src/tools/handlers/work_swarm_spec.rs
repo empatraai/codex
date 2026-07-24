@@ -4,6 +4,12 @@ use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, Default)]
+pub struct StartWorkSwarmToolOptions {
+    pub available_agent_types: Vec<String>,
+    pub agent_type_description: String,
+}
+
 fn string_schema(description: &str) -> JsonSchema {
     JsonSchema::string(Some(description.to_string()))
 }
@@ -16,7 +22,25 @@ fn boolean_schema(description: &str) -> JsonSchema {
     JsonSchema::boolean(Some(description.to_string()))
 }
 
-pub fn create_start_work_swarm_tool() -> ToolSpec {
+pub fn create_start_work_swarm_tool(options: StartWorkSwarmToolOptions) -> ToolSpec {
+    let agent_type_description = format!(
+        "Optional specialist role for this task. Omit to use the `default` role. \
+         This is independent of `kind`: worker, reducer, and reviewer describe DAG semantics, \
+         not agent roles.\n{}",
+        options.agent_type_description
+    );
+    let agent_type_schema = if options.available_agent_types.is_empty() {
+        string_schema(agent_type_description.as_str())
+    } else {
+        JsonSchema::string_enum(
+            options
+                .available_agent_types
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            Some(agent_type_description),
+        )
+    };
     let task_schema = JsonSchema::object(
         BTreeMap::from([
             ("id".to_string(), string_schema("Stable task identifier.")),
@@ -31,10 +55,7 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
                     Some("Task kind.".to_string()),
                 ),
             ),
-            (
-                "agent_type".to_string(),
-                string_schema("Specialist role name for routing."),
-            ),
+            ("agent_type".to_string(), agent_type_schema),
             (
                 "instructions".to_string(),
                 string_schema("Task instructions for the specialist."),
@@ -75,7 +96,6 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
             "id".to_string(),
             "task_title".to_string(),
             "kind".to_string(),
-            "agent_type".to_string(),
             "instructions".to_string(),
         ]),
         Some(false.into()),
@@ -117,7 +137,7 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "start_work_swarm".to_string(),
         description:
-            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Before the first call, you MUST completely read the work-swarm:orchestrate-work-swarm skill; the runtime rejects starts until it observes that read. Select and read the matching Work Swarm scenario skill before designing a scenario-specific graph. Keep simple or tightly sequential work solo. Adapt agent_type and instructions to the task domain; use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. Omit token_budget unless the user explicitly requested a hard total token cap; it counts every worker's full input context and output and can terminate the DAG before a task reports. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id. Use wait_work_swarm—not wait_agent—when the final pipeline result is required; use get_work_swarm_status only for a non-blocking progress snapshot."
+            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Before the first call, you MUST completely read the work-swarm:orchestrate-work-swarm skill; the runtime rejects starts until it observes that read. Select and read the matching Work Swarm scenario skill before designing a scenario-specific graph. Keep simple or tightly sequential work solo. Choose agent_type only from the live role catalog shown on that field, and omit it when the default role is sufficient; task kind is independent orchestration semantics. Use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. Omit token_budget unless the user explicitly requested a hard total token cap; it counts every worker's full input context and output and can terminate the DAG before a task reports. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id. Use wait_work_swarm—not wait_agent—when the final pipeline result is required; use get_work_swarm_status only for a non-blocking progress snapshot."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -130,8 +150,8 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
                 ("policy".to_string(), policy_schema),
                 (
                     "tasks".to_string(),
-                JsonSchema::array(task_schema, Some("Typed task DAG.".to_string())),
-            ),
+                    JsonSchema::array(task_schema, Some("Typed task DAG.".to_string())),
+                ),
             ]),
             Some(vec!["policy".to_string(), "tasks".to_string()]),
             Some(false.into()),
@@ -274,7 +294,7 @@ mod tests {
     #[test]
     fn work_swarm_tool_specs_have_stable_names() {
         assert_eq!(
-            match create_start_work_swarm_tool() {
+            match create_start_work_swarm_tool(StartWorkSwarmToolOptions::default()) {
                 ToolSpec::Function(tool) => tool.name,
                 _ => panic!("expected function tool"),
             },
@@ -307,6 +327,66 @@ mod tests {
                 _ => panic!("expected function tool"),
             },
             "report_work_swarm_result"
+        );
+    }
+
+    #[test]
+    fn start_work_swarm_does_not_require_a_specialist_role() {
+        let ToolSpec::Function(tool) =
+            create_start_work_swarm_tool(StartWorkSwarmToolOptions::default())
+        else {
+            panic!("expected function tool");
+        };
+        let task_schema = tool
+            .parameters
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("tasks"))
+            .and_then(|tasks| tasks.items.as_deref())
+            .expect("task schema");
+        let required = task_schema.required.as_deref().unwrap_or_default();
+
+        assert!(
+            !required.iter().any(|field| field == "agent_type"),
+            "agent_type should be optional so ordinary tasks use the default role"
+        );
+    }
+
+    #[test]
+    fn start_work_swarm_exposes_the_live_agent_role_catalog() {
+        let ToolSpec::Function(tool) = create_start_work_swarm_tool(StartWorkSwarmToolOptions {
+            available_agent_types: vec!["default".to_string(), "legal_reviewer".to_string()],
+            agent_type_description: "Available roles:\nlegal_reviewer: Reviews legal constraints."
+                .to_string(),
+        }) else {
+            panic!("expected function tool");
+        };
+        let agent_type_schema = tool
+            .parameters
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("tasks"))
+            .and_then(|tasks| tasks.items.as_deref())
+            .and_then(|task| task.properties.as_ref())
+            .and_then(|properties| properties.get("agent_type"))
+            .expect("agent_type schema");
+
+        assert_eq!(
+            agent_type_schema.enum_values.as_deref(),
+            Some(
+                [
+                    serde_json::json!("default"),
+                    serde_json::json!("legal_reviewer")
+                ]
+                .as_slice()
+            )
+        );
+        assert!(
+            agent_type_schema
+                .description
+                .as_deref()
+                .is_some_and(|description| description
+                    .contains("legal_reviewer: Reviews legal constraints."))
         );
     }
 }

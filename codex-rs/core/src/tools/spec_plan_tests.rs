@@ -167,6 +167,23 @@ impl ToolPlanProbe {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn namespace_function(&self, namespace: &str, name: &str) -> &ResponsesApiTool {
+        self.visible_specs
+            .iter()
+            .find_map(|spec| match spec {
+                ToolSpec::Namespace(candidate) if candidate.name == namespace => {
+                    candidate.tools.iter().find_map(|tool| match tool {
+                        ResponsesApiNamespaceTool::Function(function) if function.name == name => {
+                            Some(function)
+                        }
+                        ResponsesApiNamespaceTool::Function(_) => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected `{name}` in namespace `{namespace}`"))
+    }
+
     fn visible_spec(&self, name: &str) -> &ToolSpec {
         self.visible_specs
             .iter()
@@ -1519,6 +1536,51 @@ async fn work_swarm_start_requires_the_builtin_orchestration_skill() {
             .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
             .iter()
             .any(|name| name == "start_work_swarm")
+    );
+}
+
+#[tokio::test]
+async fn work_swarm_start_exposes_configured_agent_roles() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        add_work_swarm_skill(turn);
+        update_config(turn, |config| {
+            config.agent_roles.insert(
+                "legal_reviewer".to_string(),
+                crate::config::AgentRoleConfig {
+                    description: Some("Reviews legal constraints.".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                },
+            );
+        });
+    })
+    .await;
+    let start = plan.namespace_function(MULTI_AGENT_V2_NAMESPACE, "start_work_swarm");
+    let agent_type_schema = start
+        .parameters
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get("tasks"))
+        .and_then(|tasks| tasks.items.as_deref())
+        .and_then(|task| task.properties.as_ref())
+        .and_then(|properties| properties.get("agent_type"))
+        .expect("agent_type schema");
+
+    assert!(
+        agent_type_schema
+            .enum_values
+            .as_ref()
+            .is_some_and(|values| values.contains(&json!("legal_reviewer")))
+    );
+    assert!(
+        agent_type_schema
+            .description
+            .as_deref()
+            .is_some_and(|description| {
+                description.contains("legal_reviewer")
+                    && description.contains("Reviews legal constraints.")
+            })
     );
 }
 

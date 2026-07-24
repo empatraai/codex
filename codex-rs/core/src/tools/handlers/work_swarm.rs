@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
+use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::available_role_names;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
@@ -30,6 +31,7 @@ use crate::tools::handlers::multi_agents_common::tool_output_response_item;
 use crate::tools::handlers::multi_agents_common::validate_task_title;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity;
+use crate::tools::handlers::work_swarm_spec::StartWorkSwarmToolOptions;
 use crate::tools::handlers::work_swarm_spec::create_cancel_work_swarm_tool;
 use crate::tools::handlers::work_swarm_spec::create_get_work_swarm_status_tool;
 use crate::tools::handlers::work_swarm_spec::create_report_work_swarm_result_tool;
@@ -150,8 +152,15 @@ async fn ensure_work_swarm_skill_read(turn: &TurnContext) -> Result<(), Function
 static ACTIVE_RUNNERS: LazyLock<Mutex<HashMap<String, watch::Sender<bool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Default)]
-pub(crate) struct StartWorkSwarmHandler;
+pub(crate) struct StartWorkSwarmHandler {
+    options: StartWorkSwarmToolOptions,
+}
+
+impl StartWorkSwarmHandler {
+    pub(crate) fn new(options: StartWorkSwarmToolOptions) -> Self {
+        Self { options }
+    }
+}
 
 pub(crate) struct WaitWorkSwarmHandler {
     options: WaitAgentTimeoutOptions,
@@ -196,12 +205,29 @@ macro_rules! impl_work_swarm_handler {
     };
 }
 
-impl_work_swarm_handler!(
-    StartWorkSwarmHandler,
-    "start_work_swarm",
-    create_start_work_swarm_tool,
-    handle_start_work_swarm
-);
+impl ToolExecutor<ToolInvocation> for StartWorkSwarmHandler {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("start_work_swarm")
+    }
+
+    fn spec(&self) -> ToolSpec {
+        create_start_work_swarm_tool(self.options.clone())
+    }
+
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(async move {
+            handle_start_work_swarm(invocation)
+                .await
+                .map(boxed_tool_output)
+        })
+    }
+}
+
+impl CoreToolRuntime for StartWorkSwarmHandler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for WaitWorkSwarmHandler {
     fn tool_name(&self) -> ToolName {
@@ -270,7 +296,7 @@ struct WorkSwarmTaskArgs {
     id: String,
     task_title: String,
     kind: String,
-    agent_type: String,
+    agent_type: Option<String>,
     instructions: String,
     dependencies: Option<Vec<String>>,
     cell: Option<String>,
@@ -952,7 +978,12 @@ fn validate_request_limits(
         )));
     }
     for task in &args.tasks {
-        if task.id.len() > 96 || task.agent_type.len() > 64 {
+        if task.id.len() > 96
+            || task
+                .agent_type
+                .as_deref()
+                .is_some_and(|agent_type| agent_type.len() > 64)
+        {
             return Err(FunctionCallError::RespondToModel(
                 "work swarm task id or agent_type is too long".to_string(),
             ));
@@ -971,7 +1002,16 @@ fn validate_request_limits(
                 task.id
             )));
         }
-        let agent_type = task.agent_type.trim();
+        let agent_type = task
+            .agent_type
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(DEFAULT_ROLE_NAME);
+        if agent_type.is_empty() {
+            return Err(FunctionCallError::RespondToModel(
+                "work swarm agent_type must be omitted or name a configured role".to_string(),
+            ));
+        }
         if resolve_role_config(&turn.config, agent_type).is_none() {
             return Err(FunctionCallError::RespondToModel(format!(
                 "unknown agent_type '{agent_type}'; available roles: {}",
@@ -1004,11 +1044,16 @@ fn build_execution_spec(
         .tasks
         .iter()
         .map(|task| {
+            let agent_type = task
+                .agent_type
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or(DEFAULT_ROLE_NAME);
             let routing = &turn.config.agent_model_routing;
             let route = routing
                 .enabled
                 .unwrap_or(!routing.routes.is_empty())
-                .then(|| routing.routes.get(task.agent_type.trim()))
+                .then(|| routing.routes.get(agent_type))
                 .flatten();
             let route_attempts = route
                 .and_then(|route| route.max_attempts)
@@ -1026,7 +1071,7 @@ fn build_execution_spec(
                 id: TaskId(task.id.trim().to_string()),
                 task_title: validate_task_title(task.task_title.as_str())?,
                 kind: parse_task_kind(task.kind.as_str())?,
-                agent_type: task.agent_type.trim().to_string(),
+                agent_type: agent_type.to_string(),
                 instructions: task.instructions.trim().to_string(),
                 dependencies: task
                     .dependencies
@@ -1673,7 +1718,7 @@ Completion contract:\n\
         task.id,
         task_spec.task_title,
         task.task_kind,
-        task.agent_type.as_deref().unwrap_or("worker"),
+        task.agent_type.as_deref().unwrap_or(DEFAULT_ROLE_NAME),
         run.title.as_deref().unwrap_or_default(),
         dependencies,
         task_spec.instructions,
@@ -2464,6 +2509,30 @@ mod tests {
             .insert(implicit_skill_invocation_seen_key(&skill));
 
         assert!(ensure_work_swarm_skill_read(&turn).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn omitted_agent_type_resolves_to_the_default_role() {
+        let (_session, turn) = make_session_and_context().await;
+        let args: StartWorkSwarmArgs = serde_json::from_value(json!({
+            "policy": {
+                "max_concurrency": 1
+            },
+            "tasks": [{
+                "id": "synthesis",
+                "task_title": "Synthesize findings",
+                "kind": "reducer",
+                "instructions": "Combine the dependency results."
+            }]
+        }))
+        .expect("request should deserialize without agent_type");
+
+        validate_request_limits(&args, &turn).expect("default role should validate");
+        let spec = build_execution_spec(&args, &turn, "run")
+            .expect("execution spec should use the default role");
+
+        assert_eq!(spec.tasks[0].agent_type, DEFAULT_ROLE_NAME);
+        assert_eq!(spec.tasks[0].kind, TaskKind::Reducer);
     }
 
     #[test]
