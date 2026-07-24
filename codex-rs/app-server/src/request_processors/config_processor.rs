@@ -482,6 +482,7 @@ fn agent_role_to_api(role: GlobalAgentRole) -> AgentRole {
         description: role.description,
         developer_instructions: role.developer_instructions,
         model: role.model,
+        model_reasoning_effort: role.model_reasoning_effort,
     }
 }
 
@@ -491,6 +492,7 @@ fn agent_role_from_api(role: AgentRole) -> GlobalAgentRole {
         description: role.description,
         developer_instructions: role.developer_instructions,
         model: role.model,
+        model_reasoning_effort: role.model_reasoning_effort,
     }
 }
 

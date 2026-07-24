@@ -23,6 +23,7 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions as CoreNetworkPermissions;
 use codex_protocol::models::WebSearchAction as CoreWebSearchAction;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemAccessMode as CoreFileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath as CoreFileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry as CoreFileSystemSandboxEntry;
@@ -70,6 +71,7 @@ fn agent_role_rpc_payloads_use_camel_case_fields() {
             description: "Research helper".to_string(),
             developer_instructions: "Use primary sources.".to_string(),
             model: "gpt-5.6-terra".to_string(),
+            model_reasoning_effort: Some(ReasoningEffort::High),
         },
     };
 
@@ -82,6 +84,7 @@ fn agent_role_rpc_payloads_use_camel_case_fields() {
                 "description": "Research helper",
                 "developerInstructions": "Use primary sources.",
                 "model": "gpt-5.6-terra",
+                "modelReasoningEffort": "high",
             }
         })
     );

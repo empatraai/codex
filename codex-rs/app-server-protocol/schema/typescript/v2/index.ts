@@ -15,6 +15,13 @@ export type { AdditionalFileSystemPermissions } from "./AdditionalFileSystemPerm
 export type { AdditionalNetworkPermissions } from "./AdditionalNetworkPermissions";
 export type { AdditionalPermissionProfile } from "./AdditionalPermissionProfile";
 export type { AgentMessageDeltaNotification } from "./AgentMessageDeltaNotification";
+export type { AgentRole } from "./AgentRole";
+export type { AgentRoleDeleteParams } from "./AgentRoleDeleteParams";
+export type { AgentRoleDeleteResponse } from "./AgentRoleDeleteResponse";
+export type { AgentRoleListParams } from "./AgentRoleListParams";
+export type { AgentRoleListResponse } from "./AgentRoleListResponse";
+export type { AgentRoleWriteParams } from "./AgentRoleWriteParams";
+export type { AgentRoleWriteResponse } from "./AgentRoleWriteResponse";
 export type { AnalyticsConfig } from "./AnalyticsConfig";
 export type { AppBranding } from "./AppBranding";
 export type { AppInfo } from "./AppInfo";

@@ -6,6 +6,7 @@ use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::ConfigToml;
 use codex_exec_server::ExecutorFileSystem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathUri;
@@ -29,6 +30,7 @@ pub struct GlobalAgentRole {
     pub description: String,
     pub developer_instructions: String,
     pub model: String,
+    pub model_reasoning_effort: Option<ReasoningEffort>,
 }
 
 pub fn validate_global_agent_type(agent_type: &str) -> std::io::Result<()> {
@@ -126,6 +128,11 @@ pub async fn write_global_agent_role(
     } else {
         document["model"] = value(role.model.clone());
     }
+    if let Some(reasoning_effort) = role.model_reasoning_effort.as_ref() {
+        document["model_reasoning_effort"] = value(reasoning_effort.to_string());
+    } else {
+        document.remove("model_reasoning_effort");
+    }
 
     let contents = document.to_string();
     let parsed_role = global_agent_role_from_file_contents(&contents, &path, &agents_dir)?;
@@ -182,6 +189,7 @@ fn normalize_global_agent_role(role: GlobalAgentRole) -> std::io::Result<GlobalA
         )?,
         // An empty model means the role inherits the caller's model.
         model: role.model.trim().to_string(),
+        model_reasoning_effort: role.model_reasoning_effort,
     })
 }
 
@@ -211,12 +219,25 @@ fn global_agent_role_from_file_contents(
     let developer_instructions =
         required_config_string(&parsed.config, "developer_instructions", role_file_label)?;
     let model = optional_config_string(&parsed.config, "model", role_file_label)?;
+    let model_reasoning_effort =
+        optional_config_string(&parsed.config, "model_reasoning_effort", role_file_label)?;
+    let model_reasoning_effort = if model_reasoning_effort.is_empty() {
+        None
+    } else {
+        Some(model_reasoning_effort.parse().map_err(|err: String| {
+            invalid_agent_role_input(format!(
+                "agent role file at {} has invalid `model_reasoning_effort`: {err}",
+                role_file_label.display()
+            ))
+        })?)
+    };
 
     Ok(GlobalAgentRole {
         agent_type: parsed.role_name,
         description,
         developer_instructions,
         model,
+        model_reasoning_effort,
     })
 }
 
@@ -821,6 +842,7 @@ service_tier = "priority"
                 description: "Research helper".to_string(),
                 developer_instructions: "Use primary sources.".to_string(),
                 model: "gpt-5.6-terra".to_string(),
+                model_reasoning_effort: Some(ReasoningEffort::High),
             },
         )
         .await?;
@@ -832,6 +854,7 @@ service_tier = "priority"
                 description: "Research helper".to_string(),
                 developer_instructions: "Use primary sources.".to_string(),
                 model: "gpt-5.6-terra".to_string(),
+                model_reasoning_effort: Some(ReasoningEffort::High),
             }
         );
         let contents = std::fs::read_to_string(agents_dir.join("researcher.toml"))?;
@@ -854,6 +877,12 @@ service_tier = "priority"
             role_file.get("model").and_then(TomlValue::as_str),
             Some("gpt-5.6-terra")
         );
+        assert_eq!(
+            role_file
+                .get("model_reasoning_effort")
+                .and_then(TomlValue::as_str),
+            Some("high")
+        );
 
         Ok(())
     }
@@ -870,6 +899,7 @@ name = "researcher"
 description = "Research helper"
 developer_instructions = "Use primary sources."
 model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
 "#,
         )?;
         std::fs::write(agents_dir.join("malformed.toml"), "name = [\n")?;
@@ -892,6 +922,7 @@ model = "gpt-5.6-terra"
                 description: "Research helper".to_string(),
                 developer_instructions: "Use primary sources.".to_string(),
                 model: "gpt-5.6-terra".to_string(),
+                model_reasoning_effort: Some(ReasoningEffort::Medium),
             }]
         );
 
@@ -921,6 +952,7 @@ model = "gpt-5.6-terra"
                 description: "Research helper".to_string(),
                 developer_instructions: "Use primary sources.".to_string(),
                 model: String::new(),
+                model_reasoning_effort: None,
             },
         )
         .await?;

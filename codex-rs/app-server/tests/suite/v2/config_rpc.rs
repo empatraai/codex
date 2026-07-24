@@ -87,6 +87,7 @@ candidates = [{ model = "gpt-route" }]
         description: "Research helper".to_string(),
         developer_instructions: "Use primary sources.".to_string(),
         model: "gpt-5.6-terra".to_string(),
+        model_reasoning_effort: Some(ReasoningEffort::High),
     };
     let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -107,6 +108,12 @@ candidates = [{ model = "gpt-route" }]
     assert_eq!(
         role_file.get("model").and_then(toml::Value::as_str),
         Some("gpt-5.6-terra")
+    );
+    assert_eq!(
+        role_file
+            .get("model_reasoning_effort")
+            .and_then(toml::Value::as_str),
+        Some("high")
     );
     assert!(
         legacy_agent_model_route(&read_config_toml(&codex_home)?, "researcher").is_none(),

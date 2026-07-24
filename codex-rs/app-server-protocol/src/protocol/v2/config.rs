@@ -375,6 +375,7 @@ pub struct AgentRole {
     pub description: String,
     pub developer_instructions: String,
     pub model: String,
+    pub model_reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

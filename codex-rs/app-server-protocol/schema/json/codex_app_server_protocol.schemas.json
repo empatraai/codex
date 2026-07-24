@@ -2106,6 +2106,78 @@
             },
             "method": {
               "enum": [
+                "agentRole/list"
+              ],
+              "title": "AgentRole/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AgentRoleListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AgentRole/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "agentRole/write"
+              ],
+              "title": "AgentRole/writeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AgentRoleWriteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AgentRole/writeRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "agentRole/delete"
+              ],
+              "title": "AgentRole/deleteRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/AgentRoleDeleteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AgentRole/deleteRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
                 "externalAgentConfig/detect"
               ],
               "title": "ExternalAgentConfig/detectRequestMethod",
@@ -6252,6 +6324,104 @@
       },
       "AgentPath": {
         "type": "string"
+      },
+      "AgentRole": {
+        "properties": {
+          "agentType": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "developerInstructions": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "modelReasoningEffort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agentType",
+          "description",
+          "developerInstructions",
+          "model"
+        ],
+        "type": "object"
+      },
+      "AgentRoleDeleteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "agentType": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentType"
+        ],
+        "title": "AgentRoleDeleteParams",
+        "type": "object"
+      },
+      "AgentRoleDeleteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "AgentRoleDeleteResponse",
+        "type": "object"
+      },
+      "AgentRoleListParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "AgentRoleListParams",
+        "type": "object"
+      },
+      "AgentRoleListResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/definitions/v2/AgentRole"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AgentRoleListResponse",
+        "type": "object"
+      },
+      "AgentRoleWriteParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "role": {
+            "$ref": "#/definitions/v2/AgentRole"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "AgentRoleWriteParams",
+        "type": "object"
+      },
+      "AgentRoleWriteResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "role": {
+            "$ref": "#/definitions/v2/AgentRole"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "AgentRoleWriteResponse",
+        "type": "object"
       },
       "AmazonBedrockCredentialSource": {
         "enum": [

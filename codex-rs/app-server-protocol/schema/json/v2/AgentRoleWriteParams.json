@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AgentRole": {
+      "properties": {
+        "agentType": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "developerInstructions": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "modelReasoningEffort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agentType",
+        "description",
+        "developerInstructions",
+        "model"
+      ],
+      "type": "object"
+    },
+    "ReasoningEffort": {
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "properties": {
+    "role": {
+      "$ref": "#/definitions/AgentRole"
+    }
+  },
+  "required": [
+    "role"
+  ],
+  "title": "AgentRoleWriteParams",
+  "type": "object"
+}
