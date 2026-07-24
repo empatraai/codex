@@ -358,7 +358,7 @@ Typical tasks:
 Rules:
 - Explicitly assign **ownership** of the task (files / responsibility). When the subtask involves code changes, you should clearly specify which files or modules the worker is responsible for. This helps avoid merge conflicts and ensures accountability. For example, you can say "Worker 1 is responsible for updating the authentication module, while Worker 2 will handle the database layer." By defining clear ownership, you can delegate more effectively and reduce coordination overhead.
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
-                        config_file: None,
+                        config_file: Some("worker.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
                     }
                 ),
@@ -388,9 +388,11 @@ Rules:
     /// Resolves a built-in role `config_file` path to embedded content.
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("builtins/explorer.toml");
+        const WORKER: &str = include_str!("builtins/worker.toml");
         const AWAITER: &str = include_str!("builtins/awaiter.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
+            "worker.toml" => Some(WORKER),
             "awaiter.toml" => Some(AWAITER),
             _ => None,
         }

@@ -121,6 +121,28 @@ async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort(
 }
 
 #[tokio::test]
+async fn apply_worker_role_adds_implementation_instructions_without_changing_model() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let before_layers = session_flags_layer_count(&config);
+    config.model = Some("implementation-model".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+
+    apply_role_to_config(&mut config, Some("worker"))
+        .await
+        .expect("worker role should apply");
+
+    assert_eq!(config.model.as_deref(), Some("implementation-model"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert!(
+        config
+            .developer_instructions
+            .as_deref()
+            .is_some_and(|instructions| instructions.contains("focused implementation worker"))
+    );
+    assert_eq!(session_flags_layer_count(&config), before_layers + 1);
+}
+
+#[tokio::test]
 async fn apply_role_returns_unavailable_for_missing_user_role_file() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     config.agent_roles.insert(
@@ -581,7 +603,11 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
 }
 
 #[test]
-fn built_in_config_file_contents_resolves_explorer_only() {
+fn built_in_config_file_contents_resolves_worker_and_rejects_missing_role() {
+    assert!(
+        built_in::config_file_contents(Path::new("worker.toml"))
+            .is_some_and(|contents| contents.contains("focused implementation worker"))
+    );
     assert_eq!(
         built_in::config_file_contents(Path::new("missing.toml")),
         None
