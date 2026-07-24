@@ -367,9 +367,59 @@ WHERE run_id = ?
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn mark_swarm_run_failed(&self, run_id: &str, error: &str) -> anyhow::Result<bool> {
+    pub async fn mark_swarm_run_failed(
+        &self,
+        run_id: &str,
+        error: &str,
+        active_attempt_token_usage: &BTreeMap<String, i64>,
+    ) -> anyhow::Result<bool> {
         let now = Utc::now().timestamp();
         let mut tx = self.pool.begin().await?;
+        for (attempt_id, token_usage) in active_attempt_token_usage {
+            let token_usage = (*token_usage).max(0);
+            if token_usage == 0 {
+                continue;
+            }
+            let attempt = sqlx::query(
+                "SELECT task_id FROM swarm_attempts WHERE id = ? AND run_id = ? AND status = ?",
+            )
+            .bind(attempt_id)
+            .bind(run_id)
+            .bind(SwarmAttemptStatus::Running.as_str())
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(attempt) = attempt else {
+                continue;
+            };
+            let task_id: String = attempt.try_get("task_id")?;
+            sqlx::query(
+                "UPDATE swarm_attempts SET token_usage = token_usage + ?, updated_at = ? WHERE id = ? AND status = ?",
+            )
+            .bind(token_usage)
+            .bind(now)
+            .bind(attempt_id)
+            .bind(SwarmAttemptStatus::Running.as_str())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE swarm_tasks SET token_usage = token_usage + ?, updated_at = ? WHERE id = ? AND status = ?",
+            )
+            .bind(token_usage)
+            .bind(now)
+            .bind(task_id)
+            .bind(SwarmTaskStatus::Running.as_str())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE swarm_runs SET token_usage = token_usage + ?, updated_at = ? WHERE id = ? AND status = ?",
+            )
+            .bind(token_usage)
+            .bind(now)
+            .bind(run_id)
+            .bind(SwarmRunStatus::Running.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             r#"
 UPDATE swarm_tasks
@@ -1979,6 +2029,47 @@ mod tests {
             runtime.list_active_swarm_runs("thread-root").await?.len(),
             1
         );
+        runtime.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_swarm_run_preserves_active_attempt_token_usage() -> anyhow::Result<()> {
+        let runtime = test_runtime().await?;
+        let attempt_id =
+            create_active_worker_attempt(&runtime, "budget-run", "budget-task", "thread-worker", 1)
+                .await?;
+        let observed_usage = 14_598;
+
+        assert!(
+            runtime
+                .mark_swarm_run_failed(
+                    "budget-run",
+                    "Work Swarm token budget exhausted",
+                    &BTreeMap::from([(attempt_id.clone(), observed_usage)]),
+                )
+                .await?
+        );
+
+        let run = runtime
+            .get_swarm_run("budget-run")
+            .await?
+            .expect("run exists");
+        let task = runtime
+            .get_swarm_task("budget-task")
+            .await?
+            .expect("task exists");
+        let attempt = runtime
+            .get_swarm_attempt(attempt_id.as_str())
+            .await?
+            .expect("attempt exists");
+
+        assert_eq!(run.status, SwarmRunStatus::Failed);
+        assert_eq!(task.status, SwarmTaskStatus::Cancelled);
+        assert_eq!(attempt.status, SwarmAttemptStatus::Failed);
+        assert_eq!(run.token_usage, observed_usage);
+        assert_eq!(task.token_usage, observed_usage);
+        assert_eq!(attempt.token_usage, observed_usage);
         runtime.close().await;
         Ok(())
     }

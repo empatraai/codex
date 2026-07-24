@@ -89,7 +89,9 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
             ),
             (
                 "token_budget".to_string(),
-                integer_schema("Optional total token budget for the run."),
+                integer_schema(
+                    "Optional hard total token cutoff for the run, including every worker's full input context and output. Omit unless the user explicitly requested a token cap.",
+                ),
             ),
             (
                 "runtime_budget_seconds".to_string(),
@@ -115,7 +117,7 @@ pub fn create_start_work_swarm_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "start_work_swarm".to_string(),
         description:
-            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Before the first call, you MUST completely read the work-swarm:orchestrate-work-swarm skill; the runtime rejects starts until it observes that read. Select and read the matching Work Swarm scenario skill before designing a scenario-specific graph. Keep simple or tightly sequential work solo. Adapt agent_type and instructions to the task domain; use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id. Use wait_work_swarm—not wait_agent—when the final pipeline result is required; use get_work_swarm_status only for a non-blocking progress snapshot."
+            "Start a durable Work-only swarm from a typed DAG when multiple narrow specialists can materially improve speed or quality. Before the first call, you MUST completely read the work-swarm:orchestrate-work-swarm skill; the runtime rejects starts until it observes that read. Select and read the matching Work Swarm scenario skill before designing a scenario-specific graph. Keep simple or tightly sequential work solo. Adapt agent_type and instructions to the task domain; use independent worker nodes for parallel evidence or implementation, reducer nodes to merge multiple outputs, and reviewer nodes for an explicit quality gate on broad, ambiguous, or high-stakes work. Dependencies are authoritative. Omit token_budget unless the user explicitly requested a hard total token cap; it counts every worker's full input context and output and can terminate the DAG before a task reports. The scheduler validates the DAG, selects economical specialist models, enforces concurrency/budgets/deadlines, recovers leases after crashes, and escalates only objective execution failures. The tool returns immediately with a server-generated run id. Use wait_work_swarm—not wait_agent—when the final pipeline result is required; use get_work_swarm_status only for a non-blocking progress snapshot."
                 .to_string(),
         strict: false,
         defer_loading: None,

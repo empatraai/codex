@@ -1164,20 +1164,19 @@ fn spawn_work_swarm_runner(
             let error = err.to_string();
             warn!("work swarm run {run_id} failed: {err:#}");
             if let Some(db) = session.state_db() {
-                let _ = db
-                    .mark_swarm_run_failed(run_id.as_str(), error.as_str())
-                    .await;
+                let _ = fail_run(&session, &turn, &db, run_id.as_str(), error.as_str()).await;
+            } else {
+                shutdown_running_work_swarm_children(&session, run_id.as_str()).await;
+                emit_work_swarm_progress(
+                    &session,
+                    &turn,
+                    run_id.as_str(),
+                    TurnWorkSwarmProgressStatus::Failed,
+                    None,
+                    Some(error.as_str()),
+                )
+                .await;
             }
-            shutdown_running_work_swarm_children(&session, run_id.as_str()).await;
-            emit_work_swarm_progress(
-                &session,
-                &turn,
-                run_id.as_str(),
-                TurnWorkSwarmProgressStatus::Failed,
-                None,
-                Some(error.as_str()),
-            )
-            .await;
         }
         finished_tx.send_replace(true);
         ACTIVE_RUNNERS
@@ -1915,11 +1914,19 @@ async fn run_limit_failure(
                 );
             }
         }
-        if run.token_usage.saturating_add(live_tokens) >= limit {
-            return Ok(Some("Work Swarm token budget exhausted".to_string()));
-        }
+        return Ok(token_budget_failure(limit, run.token_usage, live_tokens));
     }
     Ok(None)
+}
+
+fn token_budget_failure(limit: i64, persisted_tokens: i64, live_tokens: i64) -> Option<String> {
+    let observed_tokens = persisted_tokens.saturating_add(live_tokens);
+    (observed_tokens >= limit).then(|| {
+        format!(
+            "Work Swarm token budget exhausted: observed {observed_tokens} tokens against a hard \
+             limit of {limit}; usage includes active workers' full input context and output"
+        )
+    })
 }
 
 async fn fail_run(
@@ -1929,8 +1936,33 @@ async fn fail_run(
     run_id: &str,
     reason: &str,
 ) -> anyhow::Result<()> {
-    shutdown_running_work_swarm_children(session, run_id).await;
-    db.mark_swarm_run_failed(run_id, reason).await?;
+    let (_, tasks, _, _, _) = db.load_swarm_recovery_data(run_id).await?;
+    let mut active_attempt_token_usage = BTreeMap::new();
+    let mut worker_thread_ids = Vec::new();
+    for task in tasks
+        .iter()
+        .filter(|task| task.status == SwarmTaskStatus::Running)
+    {
+        let Some(worker_thread_id) = task.assigned_thread_id.as_deref() else {
+            continue;
+        };
+        worker_thread_ids.push(worker_thread_id.to_string());
+        let Some(thread_id) = ThreadId::from_string(worker_thread_id).ok() else {
+            continue;
+        };
+        active_attempt_token_usage.insert(
+            attempt_id(task),
+            session
+                .services
+                .agent_control
+                .child_token_usage(thread_id)
+                .await
+                .max(0),
+        );
+    }
+    db.mark_swarm_run_failed(run_id, reason, &active_attempt_token_usage)
+        .await?;
+    shutdown_work_swarm_worker_threads(session, worker_thread_ids).await;
     emit_work_swarm_progress(
         session,
         turn,
@@ -2432,6 +2464,18 @@ mod tests {
             .insert(implicit_skill_invocation_seen_key(&skill));
 
         assert!(ensure_work_swarm_skill_read(&turn).await.is_ok());
+    }
+
+    #[test]
+    fn token_budget_failure_reports_live_usage_that_crossed_the_limit() {
+        assert_eq!(
+            token_budget_failure(12_000, 0, 14_598).as_deref(),
+            Some(
+                "Work Swarm token budget exhausted: observed 14598 tokens against a hard limit of \
+                 12000; usage includes active workers' full input context and output"
+            )
+        );
+        assert_eq!(token_budget_failure(12_000, 2_000, 9_999), None);
     }
 
     #[test]
