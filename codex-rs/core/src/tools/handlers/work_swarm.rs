@@ -8,6 +8,8 @@ use crate::function_tool::FunctionCallError;
 use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use crate::skills::SkillMetadata;
+use crate::skills::implicit_skill_invocation_seen_key;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -98,6 +100,52 @@ const MAX_WORK_SWARM_TASKS: usize = 64;
 const MAX_TASK_ATTEMPTS: u32 = 8;
 const RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const WORK_SWARM_AGENT_NAME_PREFIX: &str = "work_swarm_";
+const WORK_SWARM_SKILL_NAME: &str = "work-swarm:orchestrate-work-swarm";
+const WORK_SWARM_PLUGIN_ID: &str = "work-swarm@empatra-work-swarm";
+
+fn work_swarm_skill(turn: &TurnContext) -> Option<&SkillMetadata> {
+    turn.turn_skills
+        .snapshot
+        .outcome()
+        .skills
+        .iter()
+        .find(|skill| {
+            skill.name == WORK_SWARM_SKILL_NAME
+                && skill.plugin_id.as_deref() == Some(WORK_SWARM_PLUGIN_ID)
+                && turn.turn_skills.snapshot.outcome().is_skill_enabled(skill)
+        })
+}
+
+pub(crate) fn work_swarm_skill_available(turn: &TurnContext) -> bool {
+    work_swarm_skill(turn).is_some()
+}
+
+async fn ensure_work_swarm_skill_read(turn: &TurnContext) -> Result<(), FunctionCallError> {
+    let Some(skill) = work_swarm_skill(turn) else {
+        return Err(FunctionCallError::RespondToModel(
+            "start_work_swarm is unavailable because the required \
+             work-swarm:orchestrate-work-swarm skill is missing or disabled. Enable Agents so \
+             Empatra can install and enable the Work Swarm plugin."
+                .to_string(),
+        ));
+    };
+    let seen_key = implicit_skill_invocation_seen_key(skill);
+    let was_read = turn
+        .turn_skills
+        .implicit_invocation_seen_skills
+        .lock()
+        .await
+        .contains(&seen_key);
+    if was_read {
+        return Ok(());
+    }
+
+    Err(FunctionCallError::RespondToModel(format!(
+        "Before start_work_swarm, completely read the required \
+         work-swarm:orchestrate-work-swarm skill at {}. The runtime has not observed that read yet.",
+        skill.path_to_skills_md.display()
+    )))
+}
 
 static ACTIVE_RUNNERS: LazyLock<Mutex<HashMap<String, watch::Sender<bool>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -370,6 +418,7 @@ async fn handle_start_work_swarm(
         ..
     } = invocation;
     ensure_orchestrator_source(&turn)?;
+    ensure_work_swarm_skill_read(&turn).await?;
     let args: StartWorkSwarmArgs = parse_arguments(&function_arguments(payload)?)?;
     validate_request_limits(&args, &turn)?;
     let db = required_state_db(&session)?;
@@ -2340,6 +2389,50 @@ impl_tool_output!(ReportWorkSwarmResult, "report_work_swarm_result");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::tests::make_session_and_context;
+    use crate::session::turn_context::TurnSkillsContext;
+    use codex_core_skills::HostSkillsSnapshot;
+    use codex_core_skills::SkillLoadOutcome;
+    use codex_protocol::protocol::SkillScope;
+
+    fn work_swarm_skill_metadata() -> SkillMetadata {
+        let path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+            std::env::current_dir()
+                .expect("current directory")
+                .join("work-swarm-SKILL.md"),
+        )
+        .expect("skill path should be absolute");
+        SkillMetadata {
+            name: WORK_SWARM_SKILL_NAME.to_string(),
+            description: "Orchestrate Work Swarms.".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: path,
+            scope: SkillScope::User,
+            plugin_id: Some(WORK_SWARM_PLUGIN_ID.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn work_swarm_start_requires_an_observed_skill_read() {
+        let (_session, mut turn) = make_session_and_context().await;
+        let skill = work_swarm_skill_metadata();
+        let mut outcome = SkillLoadOutcome::default();
+        outcome.skills = vec![skill.clone()];
+        turn.turn_skills = TurnSkillsContext::new(HostSkillsSnapshot::new(Arc::new(outcome)));
+
+        assert!(ensure_work_swarm_skill_read(&turn).await.is_err());
+
+        turn.turn_skills
+            .implicit_invocation_seen_skills
+            .lock()
+            .await
+            .insert(implicit_skill_invocation_seen_key(&skill));
+
+        assert!(ensure_work_swarm_skill_read(&turn).await.is_ok());
+    }
 
     #[test]
     fn stored_task_ids_are_run_scoped_and_reversible() {

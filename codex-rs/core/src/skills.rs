@@ -45,6 +45,17 @@ pub(crate) fn skills_load_input_from_config(
     )
 }
 
+pub(crate) fn implicit_skill_invocation_seen_key(skill: &SkillMetadata) -> String {
+    let skill_scope = match skill.scope {
+        SkillScope::User => "user",
+        SkillScope::Repo => "repo",
+        SkillScope::System => "system",
+        SkillScope::Admin => "admin",
+    };
+    let skill_path = skill.path_to_skills_md.to_string_lossy();
+    format!("{skill_scope}:{skill_path}:{}", skill.name)
+}
+
 pub(crate) async fn maybe_emit_implicit_skill_invocation(
     sess: &Session,
     turn_context: &TurnContext,
@@ -58,6 +69,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
     ) else {
         return;
     };
+    let seen_key = implicit_skill_invocation_seen_key(&candidate);
     let invocation = SkillInvocation {
         skill_name: candidate.name,
         skill_scope: candidate.scope,
@@ -65,15 +77,7 @@ pub(crate) async fn maybe_emit_implicit_skill_invocation(
         plugin_id: candidate.plugin_id,
         invocation_type: InvocationType::Implicit,
     };
-    let skill_scope = match invocation.skill_scope {
-        SkillScope::User => "user",
-        SkillScope::Repo => "repo",
-        SkillScope::System => "system",
-        SkillScope::Admin => "admin",
-    };
-    let skill_path = invocation.skill_path.to_string_lossy();
     let skill_name = invocation.skill_name.clone();
-    let seen_key = format!("{skill_scope}:{skill_path}:{skill_name}");
     let inserted = {
         let mut seen_skills = turn_context
             .turn_skills

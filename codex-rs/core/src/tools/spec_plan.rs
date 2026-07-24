@@ -56,6 +56,7 @@ use crate::tools::handlers::work_swarm::GetWorkSwarmStatusHandler;
 use crate::tools::handlers::work_swarm::ReportWorkSwarmResultHandler;
 use crate::tools::handlers::work_swarm::StartWorkSwarmHandler;
 use crate::tools::handlers::work_swarm::WaitWorkSwarmHandler;
+use crate::tools::handlers::work_swarm::work_swarm_skill_available;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_image_generation_tool;
 use crate::tools::hosted_spec::create_web_search_tool;
@@ -866,10 +867,12 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                 exposure,
             ));
             if is_root_orchestrator && !is_work_swarm_worker {
-                planned_tools.add_arc(override_tool_exposure(
-                    multi_agent_v2_handler(StartWorkSwarmHandler, tool_namespace),
-                    exposure,
-                ));
+                if work_swarm_skill_available(turn_context) {
+                    planned_tools.add_arc(override_tool_exposure(
+                        multi_agent_v2_handler(StartWorkSwarmHandler, tool_namespace),
+                        exposure,
+                    ));
+                }
                 planned_tools.add_arc(override_tool_exposure(
                     multi_agent_v2_handler(
                         WaitWorkSwarmHandler::new(context.wait_agent_timeouts),

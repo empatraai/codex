@@ -252,6 +252,8 @@ const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collabo
 
 For a pipeline created by `start_work_swarm`, call `wait_work_swarm` with its `run_id` when you need the final result of the whole DAG. `wait_agent` waits for ordinary Agent V2 mailbox activity and does not represent Work Swarm pipeline completion.
 
+When `start_work_swarm` is available, completely read the `work-swarm:orchestrate-work-swarm` skill before calling it. The runtime rejects a start until it observes that skill read. Then select and read the matching Work Swarm scenario skill before designing a scenario-specific graph.
+
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.
 - All agents use the same current working directory.

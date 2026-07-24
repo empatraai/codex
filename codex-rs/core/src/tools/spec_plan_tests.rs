@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use codex_core_skills::HostSkillsSnapshot;
+use codex_core_skills::SkillLoadOutcome;
+use codex_core_skills::SkillMetadata;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -17,6 +20,7 @@ use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::SubAgentSource;
 use codex_tools::DiscoverablePluginInfo;
 use codex_tools::DiscoverableTool;
@@ -35,6 +39,7 @@ use crate::config::CurrentTimeReminderConfig;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnSkillsContext;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::router::ToolRouter;
@@ -224,6 +229,28 @@ fn set_features(turn: &mut TurnContext, features: &[Feature]) {
     for feature in features {
         set_feature(turn, *feature, /*enabled*/ true);
     }
+}
+
+fn add_work_swarm_skill(turn: &mut TurnContext) {
+    let skill_path = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        std::env::current_dir()
+            .expect("current directory")
+            .join("work-swarm-SKILL.md"),
+    )
+    .expect("skill path should be absolute");
+    let mut outcome = SkillLoadOutcome::default();
+    outcome.skills = vec![SkillMetadata {
+        name: "work-swarm:orchestrate-work-swarm".to_string(),
+        description: "Orchestrate Work Swarms.".to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        policy: None,
+        path_to_skills_md: skill_path,
+        scope: SkillScope::User,
+        plugin_id: Some("work-swarm@empatra-work-swarm".to_string()),
+    }];
+    turn.turn_skills = TurnSkillsContext::new(HostSkillsSnapshot::new(Arc::new(outcome)));
 }
 
 fn zsh_fork_config_for_spec_plan_tests() -> codex_tools::ZshForkConfig {
@@ -1460,6 +1487,39 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
             "expected {tool_name} in agents namespace"
         );
     }
+}
+
+#[tokio::test]
+async fn work_swarm_start_requires_the_builtin_orchestration_skill() {
+    let without_skill = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    assert!(
+        !without_skill
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| name == "start_work_swarm")
+    );
+    assert!(
+        without_skill
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| name == "wait_work_swarm"),
+        "recovery tools must remain available for an existing run"
+    );
+
+    let with_skill = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        add_work_swarm_skill(turn);
+    })
+    .await;
+    assert!(
+        with_skill
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| name == "start_work_swarm")
+    );
 }
 
 #[tokio::test]
