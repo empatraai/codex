@@ -10514,6 +10514,17 @@ enabled = true
         resolve_multi_agent_v2_config(&ConfigToml::default())
     );
     assert_eq!(
+        config.multi_agent_v2.tool_namespace.as_deref(),
+        Some("empatra_collaboration")
+    );
+    let root_usage_hint = config
+        .multi_agent_v2
+        .root_agent_usage_hint_text
+        .as_deref()
+        .expect("default root-agent usage hint");
+    assert!(root_usage_hint.contains("functions.empatra_collaboration.spawn_agent"));
+    assert!(!root_usage_hint.contains("functions.collaboration.spawn_agent"));
+    assert_eq!(
         (
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
