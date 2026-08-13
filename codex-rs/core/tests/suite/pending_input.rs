@@ -706,6 +706,194 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_ite
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_preempts_stalled_sampling_before_unstarted_tool_call() {
+    const INITIAL_PROMPT: &str = "first prompt";
+    const STEER_PROMPT: &str = "redirect the active turn";
+    const STALE_CALL_ID: &str = "call-stale";
+
+    let (gate_stale_output_tx, gate_stale_output_rx) = oneshot::channel();
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        gated_chunk(
+            gate_stale_output_rx,
+            vec![
+                ev_function_call(
+                    STALE_CALL_ID,
+                    "shell",
+                    r#"{"command":"echo stale tool call"}"#,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
+    ];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
+    let codex = build_codex(&server).await;
+
+    submit_user_input(&codex, INITIAL_PROMPT).await;
+    server.wait_for_request_count(1).await;
+    steer_user_input(&codex, STEER_PROMPT).await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server.wait_for_request_count(2),
+    )
+    .await
+    .expect("steer should preempt the stalled sampling request");
+    let _ = gate_stale_output_tx.send(());
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let second: Value = from_slice(&requests[1]).expect("parse second request");
+    let relevant_user_input = message_input_texts(&second, "user")
+        .into_iter()
+        .filter(|text| text == INITIAL_PROMPT || text == STEER_PROMPT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relevant_user_input,
+        vec![INITIAL_PROMPT.to_string(), STEER_PROMPT.to_string()]
+    );
+    assert!(
+        second
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|input| input.iter().all(|item| {
+                item.get("call_id").and_then(Value::as_str) != Some(STALE_CALL_ID)
+            })),
+        "the unstarted tool call from the preempted response must not be replayed"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_preempts_sampling_after_started_tool_call_without_replaying_it() {
+    const SLEEP_CALL_ID: &str = "sleep-call";
+    const SLEEP_DURATION_MS: u64 = 3_600_000;
+    const INITIAL_PROMPT: &str = "sleep and then keep sampling";
+    const STEER_PROMPT: &str = "stop sleeping and redirect the turn";
+
+    let (gate_completed_tx, gate_completed_rx) = oneshot::channel();
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        chunk(ev_function_call_with_namespace(
+            SLEEP_CALL_ID,
+            "clock",
+            "sleep",
+            &json!({ "duration_ms": SLEEP_DURATION_MS }).to_string(),
+        )),
+        gated_chunk(gate_completed_rx, vec![ev_completed("resp-1")]),
+    ];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
+    let codex = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::CurrentTimeReminder)
+                .expect("test config should allow feature update");
+            config.current_time_reminder = Some(CurrentTimeReminderConfig {
+                sleep_tool: true,
+                ..CurrentTimeReminderConfig::default()
+            });
+        })
+        .build_with_streaming_server(&server)
+        .await
+        .expect("build Codex test session")
+        .codex;
+
+    submit_user_input(&codex, INITIAL_PROMPT).await;
+    wait_for_sleep_item_started(&codex, SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
+    steer_user_input(&codex, STEER_PROMPT).await;
+    wait_for_sleep_item_completed(&codex, SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server.wait_for_request_count(2),
+    )
+    .await
+    .expect("steer should continue after the started tool finishes");
+    let _ = gate_completed_tx.send(());
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let second: Value = from_slice(&requests[1]).expect("parse second request");
+    assert_interrupted_sleep_output(function_call_output_text(&second, SLEEP_CALL_ID));
+    let call_items = second
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("call_id").and_then(Value::as_str) == Some(SLEEP_CALL_ID))
+        .map(|item| item.get("type").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        call_items,
+        vec![Some("function_call"), Some("function_call_output")]
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mailbox_activity_does_not_overwrite_stalled_sampling_steer() {
+    const INITIAL_PROMPT: &str = "reason for a while";
+    const STEER_PROMPT: &str = "redirect after reasoning";
+
+    let (gate_reasoning_done_tx, gate_reasoning_done_rx) = oneshot::channel();
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        chunk(ev_reasoning_item_added("reason-1", &["thinking"])),
+        gated_chunk(
+            gate_reasoning_done_rx,
+            vec![
+                ev_reasoning_item("reason-1", &["thinking"], &[]),
+                ev_function_call(
+                    "call-stale",
+                    "shell",
+                    r#"{"command":"echo stale tool call"}"#,
+                ),
+                ev_completed("resp-1"),
+            ],
+        ),
+    ];
+    let (server, _completions) =
+        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
+    let codex = build_codex(&server).await;
+
+    submit_user_input(&codex, INITIAL_PROMPT).await;
+    wait_for_reasoning_item_started(&codex).await;
+    steer_user_input(&codex, STEER_PROMPT).await;
+    submit_queue_only_agent_mail(&codex, "mailbox update after steer").await;
+    let _ = gate_reasoning_done_tx.send(());
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        server.wait_for_request_count(2),
+    )
+    .await
+    .expect("mailbox activity must not erase the pending steer wakeup");
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let second: Value = from_slice(&requests[1]).expect("parse second request");
+    let relevant_user_input = message_input_texts(&second, "user")
+        .into_iter()
+        .filter(|text| text == INITIAL_PROMPT || text == STEER_PROMPT)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relevant_user_input,
+        vec![INITIAL_PROMPT.to_string(), STEER_PROMPT.to_string()]
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn user_input_does_not_preempt_after_reasoning_item() {
     let (gate_reasoning_done_tx, gate_reasoning_done_rx) = oneshot::channel();
 

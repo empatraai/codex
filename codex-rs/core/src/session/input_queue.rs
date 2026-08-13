@@ -34,16 +34,25 @@ pub(crate) struct TurnInputQueue {
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
+    steer_tx: watch::Sender<u64>,
     mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
 }
 
 impl InputQueue {
     pub(crate) fn new() -> Self {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
+        let (steer_tx, _) = watch::channel(0);
         Self {
             activity_tx,
+            steer_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub(crate) fn subscribe_steer(&self) -> watch::Receiver<u64> {
+        let mut steer_rx = self.steer_tx.subscribe();
+        steer_rx.borrow_and_update();
+        steer_rx
     }
 
     pub(crate) async fn subscribe_activity(
@@ -177,6 +186,8 @@ impl InputQueue {
             turn_state.pending_input.items.extend(input);
             turn_state.accept_mailbox_delivery_for_current_turn();
         }
+        self.steer_tx
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         self.activity_tx.send_replace(InputQueueActivity::Steer);
     }
 
@@ -254,6 +265,18 @@ impl InputQueue {
             return false;
         }
         self.has_pending_mailbox_items().await
+    }
+
+    pub(crate) async fn has_pending_steer(&self, active_turn: &Mutex<Option<ActiveTurn>>) -> bool {
+        let turn_state = active_turn
+            .lock()
+            .await
+            .as_ref()
+            .map(|active_turn| Arc::clone(&active_turn.turn_state));
+        let Some(turn_state) = turn_state else {
+            return false;
+        };
+        turn_state.lock().await.pending_input.has_user_input()
     }
 }
 

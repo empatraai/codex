@@ -189,6 +189,7 @@ pub(crate) async fn run_turn(
     if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
         return Ok(None);
     }
+    let mut steer_rx = sess.input_queue.subscribe_steer();
 
     sess.merge_connector_selection(explicitly_enabled_connectors.clone())
         .await;
@@ -222,12 +223,15 @@ pub(crate) async fn run_turn(
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
     let mut next_step_context = Some(first_step_context);
+    let mut sampling_preemption = SamplingPreemption::Steerable;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
         let pending_input = if can_drain_pending_input {
-            sess.input_queue.get_pending_input(&sess.active_turn).await
+            let pending_input = sess.input_queue.get_pending_input(&sess.active_turn).await;
+            steer_rx.borrow_and_update();
+            pending_input
         } else {
             Vec::new()
         };
@@ -289,6 +293,8 @@ pub(crate) async fn run_turn(
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
+                sampling_preemption,
+                &mut steer_rx,
                 cancellation_token.child_token(),
             )
             .await
@@ -300,6 +306,7 @@ pub(crate) async fn run_turn(
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
                 } = sampling_request_output;
+                sampling_preemption = SamplingPreemption::Steerable;
                 can_drain_pending_input = true;
                 let (has_pending_input, token_status, estimated_token_count) = async {
                     let has_pending_input =
@@ -315,6 +322,9 @@ pub(crate) async fn run_turn(
                 }
                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
                 .await;
+                if sess.input_queue.has_pending_steer(&sess.active_turn).await {
+                    steer_rx.borrow_and_update();
+                }
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
                 let token_limit_reached = token_status.token_limit_reached;
 
@@ -365,6 +375,9 @@ pub(crate) async fn run_turn(
                         return Ok(None);
                     }
                     can_drain_pending_input = !model_needs_follow_up;
+                    if model_needs_follow_up {
+                        sampling_preemption = SamplingPreemption::RequiredContinuation;
+                    }
                     continue;
                 }
 
@@ -1077,6 +1090,8 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
+    sampling_preemption: SamplingPreemption,
+    steer_rx: &mut tokio::sync::watch::Receiver<u64>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1123,6 +1138,8 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            sampling_preemption,
+            steer_rx,
             cancellation_token.child_token(),
         )
         .await
@@ -1313,6 +1330,12 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SamplingPreemption {
+    Steerable,
+    RequiredContinuation,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1893,6 +1916,8 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    sampling_preemption: SamplingPreemption,
+    steer_rx: &mut tokio::sync::watch::Receiver<u64>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
@@ -1928,6 +1953,8 @@ async fn try_run_sampling_request(
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
+    let mut response_created = false;
+    let mut non_tool_response_item_committed = false;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
         Box<dyn ToolArgumentDiffConsumer>,
@@ -1957,12 +1984,33 @@ async fn try_run_sampling_request(
             codex.usage.total_tokens = field::Empty,
         );
 
-        let event = match stream
+        let next_event = stream
             .next()
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
-            .or_cancel(&cancellation_token)
-            .await
+            .or_cancel(&cancellation_token);
+        let event = if sampling_preemption == SamplingPreemption::Steerable
+            && response_created
+            && !non_tool_response_item_committed
+            && active_item.is_none()
         {
+            tokio::select! {
+                biased;
+                _ = steer_rx.changed() => {
+                    let has_pending_steer = sess.input_queue.has_pending_steer(&sess.active_turn).await;
+                    if has_pending_steer {
+                        break Ok(SamplingRequestResult {
+                            needs_follow_up: true,
+                            last_agent_message,
+                        });
+                    }
+                    continue;
+                }
+                event = next_event => event,
+            }
+        } else {
+            next_event.await
+        };
+        let event = match event {
             Ok(event) => event,
             Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
         };
@@ -1984,8 +2032,16 @@ async fn try_run_sampling_request(
         record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
-            ResponseEvent::Created => {}
+            ResponseEvent::Created => {
+                response_created = true;
+            }
             ResponseEvent::OutputItemDone(item) => {
+                non_tool_response_item_committed |= !matches!(
+                    item,
+                    ResponseItem::LocalShellCall { .. }
+                        | ResponseItem::FunctionCall { .. }
+                        | ResponseItem::CustomToolCall { .. }
+                );
                 if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
                     && let Ok(Some(event)) = consumer.finish()
                 {
