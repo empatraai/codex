@@ -541,15 +541,19 @@ pub(crate) async fn record_pending_input(
     turn_context: &Arc<TurnContext>,
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
-) {
+) -> bool {
     match pending_input {
         TurnInput::UserInput { content, client_id } => {
-            sess.record_user_prompt_and_emit_turn_item(
-                turn_context.as_ref(),
-                content.as_slice(),
-                client_id,
-            )
-            .await;
+            if !sess
+                .record_user_prompt_and_emit_turn_item(
+                    turn_context.as_ref(),
+                    content.as_slice(),
+                    client_id,
+                )
+                .await
+            {
+                return false;
+            }
         }
         TurnInput::ResponseItem(item) => {
             sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
@@ -561,6 +565,7 @@ pub(crate) async fn record_pending_input(
         }
     }
     record_additional_contexts(sess, turn_context, additional_contexts).await;
+    true
 }
 
 async fn run_context_injecting_hook<Fut, Outcome>(

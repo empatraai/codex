@@ -36,6 +36,185 @@ mod thread_list_cwd_filter_tests {
     }
 }
 
+mod atomic_initial_event_bundle_tests {
+    use super::super::*;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::models::LocalImagePreparation;
+    use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::protocol::TurnStartedEvent;
+
+    fn text(value: &str) -> V2UserInput {
+        V2UserInput::Text {
+            text: value.to_string(),
+            text_elements: Vec::new(),
+        }
+    }
+
+    fn persisted_message(turn_id: &str, value: &str) -> RolloutItem {
+        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
+            vec![text(value).into_core()],
+            LocalImagePreparation::Defer,
+        ));
+        item.set_turn_id_if_missing(turn_id);
+        RolloutItem::ResponseItem(item)
+    }
+
+    fn turn_started(turn_id: &str) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: Some(128_000),
+            collaboration_mode_kind: ModeKind::Default,
+        }))
+    }
+
+    fn user_message_completed(turn_id: &str, value: &str) -> RolloutItem {
+        let _ = turn_id;
+        RolloutItem::EventMsg(EventMsg::UserMessage(
+            codex_protocol::protocol::UserMessageEvent {
+                client_id: None,
+                message: value.to_string(),
+                images: Some(Vec::new()),
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+                ..Default::default()
+            },
+        ))
+    }
+
+    #[test]
+    fn requires_the_exact_persisted_initial_message() {
+        let turn_id = "018bcfe5-6800-7000-8000-000000000099";
+        assert!(matches!(
+            atomic_initial_event_bundle(
+                &[
+                    turn_started(turn_id),
+                    persisted_message(turn_id, "wrong"),
+                    user_message_completed(turn_id, "expected"),
+                ],
+                turn_id,
+                &[text("expected")],
+            ),
+            AtomicInitialEvidence::Partial
+        ));
+        let AtomicInitialEvidence::Complete(bundle) = atomic_initial_event_bundle(
+            &[
+                turn_started(turn_id),
+                persisted_message(turn_id, "expected"),
+                user_message_completed(turn_id, "expected"),
+            ],
+            turn_id,
+            &[text("expected")],
+        ) else {
+            panic!("exact initial message should be reconstructable")
+        };
+        assert_eq!(bundle.len(), 1);
+        assert!(matches!(bundle[0].msg, EventMsg::TurnStarted(_)));
+    }
+
+    #[test]
+    fn ignores_unrelated_turn_events() {
+        let turn_id = "018bcfe5-6800-7000-8000-000000000099";
+        let other_turn_id = "018bcfe5-6800-7000-8000-000000000100";
+        let AtomicInitialEvidence::Complete(bundle) = atomic_initial_event_bundle(
+            &[
+                turn_started(other_turn_id),
+                persisted_message(other_turn_id, "unrelated"),
+                user_message_completed(other_turn_id, "unrelated"),
+                turn_started(turn_id),
+                persisted_message(turn_id, "expected"),
+                user_message_completed(turn_id, "expected"),
+            ],
+            turn_id,
+            &[text("expected")],
+        ) else {
+            panic!("matching turn should be reconstructable")
+        };
+        assert_eq!(bundle.len(), 1);
+        assert_eq!(bundle[0].id, turn_id);
+    }
+
+    #[test]
+    fn distinguishes_safe_resubmit_from_partial_turn_evidence() {
+        let turn_id = "018bcfe5-6800-7000-8000-000000000099";
+        assert!(matches!(
+            atomic_initial_event_bundle(&[], turn_id, &[text("expected")]),
+            AtomicInitialEvidence::Absent,
+        ));
+        assert!(matches!(
+            atomic_initial_event_bundle(&[turn_started(turn_id)], turn_id, &[text("expected")]),
+            AtomicInitialEvidence::Partial,
+        ));
+        assert!(matches!(
+            atomic_initial_event_bundle(
+                &[
+                    turn_started(turn_id),
+                    persisted_message(turn_id, "expected")
+                ],
+                turn_id,
+                &[text("expected")],
+            ),
+            AtomicInitialEvidence::Partial,
+        ));
+    }
+
+    #[test]
+    fn publication_reports_active_only_while_the_atomic_turn_is_live() {
+        assert!(matches!(
+            empatra_publication_status(ThreadStatus::Idle, &AgentStatus::Running),
+            ThreadStatus::Active { .. },
+        ));
+        assert_eq!(
+            empatra_publication_status(ThreadStatus::Idle, &AgentStatus::Interrupted),
+            ThreadStatus::Idle,
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_or_mismatched_same_turn_evidence() {
+        let turn_id = "018bcfe5-6800-7000-8000-000000000099";
+        let complete_tail = || {
+            vec![
+                persisted_message(turn_id, "expected"),
+                user_message_completed(turn_id, "expected"),
+            ]
+        };
+        let mut duplicate_start = vec![turn_started(turn_id), turn_started(turn_id)];
+        duplicate_start.extend(complete_tail());
+        assert!(matches!(
+            atomic_initial_event_bundle(&duplicate_start, turn_id, &[text("expected")]),
+            AtomicInitialEvidence::Partial,
+        ));
+        assert!(matches!(
+            atomic_initial_event_bundle(
+                &[
+                    turn_started(turn_id),
+                    persisted_message(turn_id, "wrong"),
+                    persisted_message(turn_id, "expected"),
+                    user_message_completed(turn_id, "expected"),
+                ],
+                turn_id,
+                &[text("expected")],
+            ),
+            AtomicInitialEvidence::Partial,
+        ));
+        assert!(matches!(
+            atomic_initial_event_bundle(
+                &[
+                    turn_started(turn_id),
+                    persisted_message(turn_id, "expected"),
+                    persisted_message(turn_id, "expected"),
+                    user_message_completed(turn_id, "expected"),
+                ],
+                turn_id,
+                &[text("expected")],
+            ),
+            AtomicInitialEvidence::Partial,
+        ));
+    }
+}
+
 mod background_terminal_pagination_tests {
     use super::super::paginate_background_terminals;
     use codex_app_server_protocol::ThreadBackgroundTerminal;
@@ -322,6 +501,67 @@ mod thread_processor_behavior_tests {
         );
 
         assert_eq!(turns.last(), Some(&active_turn));
+    }
+
+    #[test]
+    fn published_atomic_input_without_release_reconstructs_as_interrupted() {
+        let turn_id = "018bcfe5-6800-7000-8000-000000000061";
+        let mut user_message = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "durable first input".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        user_message.set_turn_id_if_missing(turn_id);
+        let user_message_completed = RolloutItem::EventMsg(EventMsg::UserMessage(
+            codex_protocol::protocol::UserMessageEvent {
+                client_id: None,
+                message: "durable first input".to_string(),
+                images: Some(Vec::new()),
+                local_images: Vec::new(),
+                text_elements: Vec::new(),
+                ..Default::default()
+            },
+        ));
+        let persisted_items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
+                    turn_id: turn_id.to_string(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                },
+            )),
+            RolloutItem::ResponseItem(user_message),
+            user_message_completed,
+        ];
+
+        let turns = reconstruct_thread_turns_for_turns_list(
+            &persisted_items,
+            ThreadStatus::NotLoaded,
+            /*has_live_running_thread*/ false,
+            None,
+        );
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, turn_id);
+        assert_eq!(turns[0].status, TurnStatus::Interrupted);
+        assert!(
+            matches!(
+                turns[0].items.as_slice(),
+                [ThreadItem::UserMessage { content, .. }]
+                    if content == &vec![V2UserInput::Text {
+                        text: "durable first input".to_string(),
+                        text_elements: Vec::new(),
+                    }]
+            ),
+            "unexpected reconstructed items: {:?}",
+            turns[0].items
+        );
     }
 
     #[test]

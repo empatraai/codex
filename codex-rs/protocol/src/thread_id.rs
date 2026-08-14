@@ -29,6 +29,10 @@ impl ThreadId {
             uuid: Uuid::parse_str(s)?,
         })
     }
+
+    pub fn is_uuid_v7(self) -> bool {
+        self.uuid.get_version_num() == 7
+    }
 }
 
 impl TryFrom<&str> for ThreadId {

@@ -5246,6 +5246,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
         Some(config.multi_agent_version_from_features()),
+        /*requested_thread_id*/ None,
     )
     .await;
 
@@ -5502,6 +5503,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        atomic_initial_turn_receipts: Mutex::new(Default::default()),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -5628,6 +5630,7 @@ async fn make_session_with_config_and_rx(
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
         Some(config.multi_agent_version_from_features()),
+        /*requested_thread_id*/ None,
     )
     .await?;
 
@@ -5743,6 +5746,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
         Some(config.multi_agent_version_from_features()),
+        /*requested_thread_id*/ None,
     )
     .await?;
 
@@ -6465,6 +6469,70 @@ async fn submit_with_id_captures_current_span_trace_context() {
 
     let submitted = rx_sub.recv().await.expect("submission");
     assert_eq!(submitted.trace, Some(expected_trace));
+}
+
+#[test]
+fn atomic_initial_turn_does_not_contact_model_before_publication_release() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let server = start_mock_server().await;
+            mount_sse_once(
+                &server,
+                sse(vec![
+                    ev_response_created("response-1"),
+                    ev_completed("response-1"),
+                ]),
+            )
+            .await;
+            let mut builder = test_codex();
+            let harness = builder.build(&server).await?;
+            let turn_id = "018bcfe5-6800-7000-8000-000000000081";
+            let receipt = harness
+                .codex
+                .submit_atomic_initial_turn_with_id(Submission {
+                    id: turn_id.to_string(),
+                    op: Op::UserInput {
+                        items: vec![UserInput::Text {
+                            text: "publish me before sampling".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                        final_output_json_schema: None,
+                        responsesapi_client_metadata: None,
+                        additional_context: Default::default(),
+                        thread_settings: Default::default(),
+                    },
+                    client_user_message_id: Some("client-message-1".to_string()),
+                    trace: None,
+                })
+                .await?;
+            let release = timeout(Duration::from_secs(5), receipt)
+                .await
+                .expect("durable initial input receipt")
+                .expect("receipt sender")
+                .expect("initial input persistence");
+
+            sleep(Duration::from_millis(100)).await;
+            assert_eq!(
+                server.received_requests().await.unwrap_or_default().len(),
+                0,
+                "the model must remain gated until publication"
+            );
+            release.send(()).expect("release the published turn");
+            wait_for_event(&harness.codex, |event| {
+                matches!(event, EventMsg::TurnComplete(_))
+            })
+            .await;
+            assert_eq!(
+                server.received_requests().await.unwrap_or_default().len(),
+                1,
+                "publication release starts the initial model turn exactly once"
+            );
+            Ok(())
+        })
 }
 
 #[tokio::test]
@@ -7585,6 +7653,7 @@ where
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        atomic_initial_turn_receipts: Mutex::new(Default::default()),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,

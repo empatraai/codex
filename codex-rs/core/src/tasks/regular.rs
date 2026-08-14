@@ -62,7 +62,11 @@ impl SessionTask for RegularTask {
         .instrument(trace_span!("regular_task.prepare_run_turn"))
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
-            SessionStartupPrewarmResolution::Cancelled => return Ok(None),
+            SessionStartupPrewarmResolution::Cancelled => {
+                sess.fail_atomic_initial_turn_receipt(&ctx.sub_id, "initial_turn_cancelled")
+                    .await;
+                return Ok(None);
+            }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
             SessionStartupPrewarmResolution::Ready(prewarmed_client_session) => {
                 Some(*prewarmed_client_session)

@@ -448,6 +448,8 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) external_time_provider: Option<Arc<dyn TimeProvider>>,
     pub(crate) inherited_multi_agent_version: Option<MultiAgentVersion>,
+    /// A caller-reserved UUIDv7 used only by idempotent host-owned creation APIs.
+    pub(crate) requested_thread_id: Option<ThreadId>,
 }
 
 pub(crate) fn resolve_multi_agent_version(
@@ -536,6 +538,7 @@ impl Codex {
             attestation_provider,
             external_time_provider,
             inherited_multi_agent_version,
+            requested_thread_id,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -702,6 +705,7 @@ impl Codex {
             attestation_provider,
             external_time_provider,
             multi_agent_version,
+            requested_thread_id,
         ))
         .await
         .map_err(|e| {
@@ -767,6 +771,23 @@ impl Codex {
         Ok(id)
     }
 
+    pub async fn submit_user_input_with_id(
+        &self,
+        id: String,
+        op: Op,
+        trace: Option<W3cTraceContext>,
+        client_user_message_id: Option<String>,
+    ) -> CodexResult<()> {
+        debug_assert!(matches!(op, Op::UserInput { .. }));
+        self.submit_with_id(Submission {
+            id,
+            op,
+            client_user_message_id,
+            trace,
+        })
+        .await
+    }
+
     /// Use sparingly: prefer `submit()` so Codex is responsible for generating
     /// unique IDs for each submission.
     pub async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
@@ -778,6 +799,34 @@ impl Codex {
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(())
+    }
+
+    /// Submit the host-reserved initial turn and return a positive receipt that is
+    /// resolved only after its user input is durably appended and flushed.
+    pub async fn submit_atomic_initial_turn_with_id(
+        &self,
+        sub: Submission,
+    ) -> CodexResult<tokio::sync::oneshot::Receiver<Result<tokio::sync::oneshot::Sender<()>, String>>>
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        {
+            let mut receipts = self.session.atomic_initial_turn_receipts.lock().await;
+            if receipts.insert(sub.id.clone(), sender).is_some() {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "atomic initial turn {} is already pending",
+                    sub.id
+                )));
+            }
+        }
+        if let Err(error) = self.submit_with_id(sub.clone()).await {
+            self.session
+                .atomic_initial_turn_receipts
+                .lock()
+                .await
+                .remove(&sub.id);
+            return Err(error);
+        }
+        Ok(receiver)
     }
 
     /// Persist a thread-level memory mode update for the active session.
@@ -980,6 +1029,20 @@ fn push_prompt_fragment(
 }
 
 impl Session {
+    pub(crate) async fn fail_atomic_initial_turn_receipt(
+        &self,
+        turn_id: &str,
+        failure_code: &'static str,
+    ) {
+        if let Some(receipt) = self
+            .atomic_initial_turn_receipts
+            .lock()
+            .await
+            .remove(turn_id)
+        {
+            let _ = receipt.send(Err(failure_code.to_string()));
+        }
+    }
     pub(crate) async fn app_server_client_metadata(&self) -> AppServerClientMetadata {
         let state = self.state.lock().await;
         AppServerClientMetadata {
@@ -3840,19 +3903,70 @@ impl Session {
         turn_context: &TurnContext,
         input: &[UserInput],
         client_id: Option<String>,
-    ) {
+    ) -> bool {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
         let response_item = self.response_item_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
+        let atomic_receipt = self
+            .atomic_initial_turn_receipts
+            .lock()
+            .await
+            .remove(&turn_context.sub_id);
+        if atomic_receipt.is_some() {
+            let items = self.prepare_conversation_items_for_history(
+                turn_context,
+                std::slice::from_ref(&response_item),
+            );
+            let items = items.as_ref();
+            let rollout_items = items
+                .iter()
+                .cloned()
+                .map(RolloutItem::ResponseItem)
+                .collect::<Vec<_>>();
+            let persistence = async {
+                let live_thread = self
+                    .live_thread_for_persistence("persist an atomic initial turn")
+                    .map_err(|error| error.to_string())?;
+                live_thread
+                    .append_items(&rollout_items)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                live_thread.flush().await.map_err(|error| error.to_string())
+            }
             .await;
+            if let Err(error) = persistence {
+                if let Some(receipt) = atomic_receipt {
+                    let _ = receipt.send(Err(error));
+                }
+                return false;
+            }
+            {
+                let mut state = self.state.lock().await;
+                state.current_time_reminder.note_recorded_items(items);
+                state.record_items(
+                    items.iter(),
+                    turn_context.model_info.truncation_policy.into(),
+                );
+            }
+            self.send_raw_response_items(turn_context, items).await;
+        } else {
+            self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
+                .await;
+        }
         let mut user_message_item = UserMessageItem::new(input);
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);
         self.emit_turn_item_started(turn_context, &turn_item).await;
         self.emit_turn_item_completed(turn_context, turn_item).await;
         self.ensure_rollout_materialized().await;
+        if let Some(receipt) = atomic_receipt {
+            let (release, released) = tokio::sync::oneshot::channel();
+            if receipt.send(Ok(release)).is_err() || released.await.is_err() {
+                return false;
+            }
+        }
+        true
     }
 
     pub(crate) async fn notify_stream_error(

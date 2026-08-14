@@ -491,6 +491,18 @@ client_request_definitions! {
         serialization: thread_or_path(params.thread_id, params.path),
         response: v2::ThreadForkResponse,
     },
+    #[experimental("empatra/thread/createAndStart")]
+    EmpatraThreadCreateAndStart => "empatra/thread/createAndStart" {
+        params: v2::EmpatraThreadCreateAndStartParams,
+        serialization: None,
+        response: v2::EmpatraThreadCreateAndStartResponse,
+    },
+    #[experimental("empatra/thread/forkAndStart")]
+    EmpatraThreadForkAndStart => "empatra/thread/forkAndStart" {
+        params: v2::EmpatraThreadForkAndStartParams,
+        serialization: None,
+        response: v2::EmpatraThreadForkAndStartResponse,
+    },
     ThreadArchive => "thread/archive" {
         params: v2::ThreadArchiveParams,
         serialization: thread_id(params.thread_id),

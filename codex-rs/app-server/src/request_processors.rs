@@ -410,6 +410,7 @@ use codex_protocol::protocol::ConversationSpeechParams;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::ConversationStartTransport;
 use codex_protocol::protocol::ConversationTextParams;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 #[cfg(test)]
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
@@ -504,6 +505,8 @@ mod process_exec_processor;
 mod remote_control_processor;
 mod search;
 mod thread_processor;
+pub(crate) use thread_processor::AtomicInitialEvidence;
+pub(crate) use thread_processor::AtomicStartedThread;
 mod token_usage_replay;
 mod turn_processor;
 mod windows_sandbox_processor;

@@ -6,6 +6,7 @@ use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::Submission;
 
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
@@ -79,6 +80,7 @@ pub(crate) struct TurnRequestProcessor {
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
+    state_db: Option<codex_rollout::StateDbHandle>,
 }
 
 fn map_additional_context(
@@ -135,6 +137,7 @@ impl TurnRequestProcessor {
         thread_watch_manager: ThreadWatchManager,
         thread_list_state_permit: Arc<Semaphore>,
         skills_watcher: Arc<SkillsWatcher>,
+        state_db: Option<codex_rollout::StateDbHandle>,
     ) -> Self {
         Self {
             auth_manager,
@@ -149,6 +152,7 @@ impl TurnRequestProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             skills_watcher,
+            state_db,
         }
     }
 
@@ -167,9 +171,58 @@ impl TurnRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             /*supports_openai_form_elicitation*/ supports_openai_form_elicitation,
+            /*requested_turn_id*/ None,
+            /*allow_reserved_thread*/ false,
         )
         .await
-        .map(|response| Some(response.into()))
+        .map(|(response, _)| Some(response.into()))
+    }
+
+    pub(crate) async fn empatra_turn_start(
+        &self,
+        request_id: ConnectionRequestId,
+        thread_id: ThreadId,
+        params: codex_app_server_protocol::EmpatraInitialTurnParams,
+        turn_id: String,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        supports_openai_form_elicitation: bool,
+    ) -> Result<
+        (
+            TurnStartResponse,
+            tokio::sync::oneshot::Receiver<Result<tokio::sync::oneshot::Sender<()>, String>>,
+        ),
+        JSONRPCErrorError,
+    > {
+        let params = TurnStartParams {
+            thread_id: thread_id.to_string(),
+            client_user_message_id: params.client_user_message_id,
+            input: params.input,
+            cwd: params.cwd,
+            approval_policy: params.approval_policy,
+            sandbox_policy: params.sandbox_policy,
+            permissions: params.permissions,
+            model: params.model,
+            effort: params.effort,
+            collaboration_mode: params.collaboration_mode,
+            ..Default::default()
+        };
+        let (response, receipt) = self
+            .turn_start_inner(
+                request_id,
+                params,
+                app_server_client_name,
+                app_server_client_version,
+                supports_openai_form_elicitation,
+                Some(turn_id),
+                /*allow_reserved_thread*/ true,
+            )
+            .await?;
+        Ok((
+            response,
+            receipt
+                .ok_or_else(|| internal_error("atomic turn did not return durability receipt"))?,
+        ))
     }
 
     pub(crate) async fn thread_inject_items(
@@ -300,10 +353,22 @@ impl TurnRequestProcessor {
     async fn load_thread(
         &self,
         thread_id: &str,
+        allow_reserved_thread: bool,
     ) -> Result<(ThreadId, Arc<CodexThread>), JSONRPCErrorError> {
         // Resolve the core conversation handle from a v2 thread id string.
         let thread_id = ThreadId::from_string(thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        if !allow_reserved_thread
+            && let Some(state_db) = self.state_db.as_ref()
+            && state_db
+                .is_empatra_atomic_thread_reserved(&thread_id.to_string())
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to check thread publication state: {error}"))
+                })?
+        {
+            return Err(invalid_request(format!("thread not found: {thread_id}")));
+        }
 
         let thread = self
             .thread_manager
@@ -446,13 +511,23 @@ impl TurnRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
-    ) -> Result<TurnStartResponse, JSONRPCErrorError> {
-        let (thread_id, thread) =
-            self.load_thread(&params.thread_id)
-                .await
-                .inspect_err(|error| {
-                    self.track_error_response(&request_id, error, /*error_type*/ None);
-                })?;
+        requested_turn_id: Option<String>,
+        allow_reserved_thread: bool,
+    ) -> Result<
+        (
+            TurnStartResponse,
+            Option<
+                tokio::sync::oneshot::Receiver<Result<tokio::sync::oneshot::Sender<()>, String>>,
+            >,
+        ),
+        JSONRPCErrorError,
+    > {
+        let (thread_id, thread) = self
+            .load_thread(&params.thread_id, allow_reserved_thread)
+            .await
+            .inspect_err(|error| {
+                self.track_error_response(&request_id, error, /*error_type*/ None);
+            })?;
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
         if let Err(error) = Self::validate_v2_input_limit(&params.input) {
@@ -526,18 +601,32 @@ impl TurnRequestProcessor {
             additional_context,
             thread_settings,
         };
-        let turn_id = thread
-            .submit_user_input_with_client_user_message_id(
-                turn_op,
-                self.request_trace_context(&request_id).await,
-                client_user_message_id,
-            )
-            .await
-            .map_err(|err| {
-                let error = internal_error(format!("failed to start turn: {err}"));
-                self.track_error_response(&request_id, &error, /*error_type*/ None);
-                error
-            })?;
+        let trace = self.request_trace_context(&request_id).await;
+        let (turn_id, durability_receipt) = if let Some(turn_id) = requested_turn_id {
+            thread
+                .submit_atomic_initial_turn_with_id(Submission {
+                    id: turn_id.clone(),
+                    op: turn_op,
+                    client_user_message_id,
+                    trace,
+                })
+                .await
+                .map(|receipt| (turn_id, Some(receipt)))
+        } else {
+            thread
+                .submit_user_input_with_client_user_message_id(
+                    turn_op,
+                    trace,
+                    client_user_message_id,
+                )
+                .await
+                .map(|turn_id| (turn_id, None))
+        }
+        .map_err(|err| {
+            let error = internal_error(format!("failed to start turn: {err}"));
+            self.track_error_response(&request_id, &error, /*error_type*/ None);
+            error
+        })?;
 
         if turn_has_input {
             let config_snapshot = thread.config_snapshot().await;
@@ -565,7 +654,7 @@ impl TurnRequestProcessor {
             duration_ms: None,
         };
 
-        Ok(TurnStartResponse { turn })
+        Ok((TurnStartResponse { turn }, durability_receipt))
     }
 
     async fn build_environment_override(
@@ -760,7 +849,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
-        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let (_, thread) = self.load_thread(&params.thread_id, false).await?;
         let cwd = resolve_request_cwd(params.cwd)?;
         let environments = self
             .build_environment_override(thread.as_ref(), cwd, /*environment_selections*/ None)
@@ -803,7 +892,7 @@ impl TurnRequestProcessor {
         &self,
         params: ThreadInjectItemsParams,
     ) -> Result<ThreadInjectItemsResponse, JSONRPCErrorError> {
-        let (_, thread) = self.load_thread(&params.thread_id).await?;
+        let (_, thread) = self.load_thread(&params.thread_id, false).await?;
 
         let items = params
             .items
@@ -852,7 +941,7 @@ impl TurnRequestProcessor {
         params: TurnSteerParams,
     ) -> Result<TurnSteerResponse, JSONRPCErrorError> {
         let (_, thread) = self
-            .load_thread(&params.thread_id)
+            .load_thread(&params.thread_id, false)
             .await
             .inspect_err(|error| {
                 self.track_error_response(request_id, error, /*error_type*/ None);
@@ -960,7 +1049,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         thread_id: &str,
     ) -> Result<Option<(ThreadId, Arc<CodexThread>)>, JSONRPCErrorError> {
-        let (thread_id, thread) = self.load_thread(thread_id).await?;
+        let (thread_id, thread) = self.load_thread(thread_id, false).await?;
 
         match self
             .ensure_conversation_listener(
@@ -1313,7 +1402,7 @@ impl TurnRequestProcessor {
             delivery,
         } = params;
 
-        let (parent_thread_id, parent_thread) = self.load_thread(&thread_id).await?;
+        let (parent_thread_id, parent_thread) = self.load_thread(&thread_id, false).await?;
         let (review_request, display_text) = Self::review_request_from_target(target)?;
         match delivery.unwrap_or(ApiReviewDelivery::Inline).to_core() {
             CoreReviewDelivery::Inline => {
@@ -1348,7 +1437,7 @@ impl TurnRequestProcessor {
         let TurnInterruptParams { thread_id, turn_id } = params;
         let is_startup_interrupt = turn_id.is_empty();
 
-        let (thread_uuid, thread) = self.load_thread(&thread_id).await?;
+        let (thread_uuid, thread) = self.load_thread(&thread_id, false).await?;
 
         // Record turn interrupts so we can reply when TurnAborted arrives. Startup
         // interrupts do not have a turn and are acknowledged after submission.

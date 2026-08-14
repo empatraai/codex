@@ -94,6 +94,7 @@ mod connection_cleanup;
 mod connection_rpc_gate;
 mod current_time;
 mod dynamic_tools;
+mod empatra_atomic;
 mod error_code;
 mod extensions;
 mod filters;
@@ -1240,6 +1241,19 @@ async fn init_sqlite_state_db_with_fresh_start_on_corruption(
         if !attempted_backups.insert(database_path.clone()) {
             return Err(anyhow::anyhow!(
                 "failed to initialize sqlite state runtime after moving damaged database file into a backup folder: {err}"
+            ));
+        }
+
+        let state_database_path = codex_state::state_db_path(config.sqlite_home.as_path());
+        if database_path == state_database_path
+            && tokio::fs::try_exists(codex_state::empatra_atomic_authority_marker_path(
+                config.sqlite_home.as_path(),
+            ))
+            .await
+            .unwrap_or(true)
+        {
+            return Err(anyhow::anyhow!(
+                "refusing to replace the damaged state database because it is the publication authority for Empatra atomic threads: {err}"
             ));
         }
 

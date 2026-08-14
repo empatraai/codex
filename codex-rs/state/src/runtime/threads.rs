@@ -1289,6 +1289,11 @@ pub(super) fn push_thread_filters<'a>(
         builder.push(" AND threads.archived = 0");
     }
     builder.push(" AND threads.preview <> ''");
+    // Atomic create/fork operations materialize before their first turn for crash recovery.
+    // Catalog and search queries must not publish that implementation state.
+    builder.push(
+        " AND NOT EXISTS (SELECT 1 FROM empatra_atomic_operations AS atomic_operation WHERE atomic_operation.thread_id = threads.id AND atomic_operation.state != 'completed')",
+    );
     if !allowed_sources.is_empty() {
         builder.push(" AND threads.source IN (");
         let mut separated = builder.separated(", ");

@@ -4,6 +4,47 @@ use super::thread_processor::unsupported_thread_store_operation;
 use super::*;
 
 impl ThreadRequestProcessor {
+    pub(crate) async fn cleanup_empatra_atomic_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<(), JSONRPCErrorError> {
+        let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
+        self.prepare_thread_for_delete(thread_id).await;
+        match self
+            .thread_store
+            .delete_thread(StoreDeleteThreadParams { thread_id })
+            .await
+        {
+            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+            Err(error) => return Err(thread_store_delete_error(error)),
+        }
+        if let Some(state_db) = self.state_db.as_ref() {
+            state_db.delete_thread(thread_id).await.map_err(|error| {
+                internal_error(format!("failed to delete atomic thread state: {error}"))
+            })?;
+        }
+        if self.thread_manager.get_thread(thread_id).await.is_ok() {
+            return Err(internal_error(format!(
+                "atomic thread {thread_id} remained loaded after cleanup"
+            )));
+        }
+        match self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+        {
+            Err(ThreadStoreError::ThreadNotFound { .. }) => Ok(()),
+            Ok(_) => Err(internal_error(format!(
+                "atomic thread {thread_id} remained persisted after cleanup"
+            ))),
+            Err(error) => Err(thread_store_delete_error(error)),
+        }
+    }
+
     pub(crate) async fn thread_delete(
         &self,
         request_id: ConnectionRequestId,

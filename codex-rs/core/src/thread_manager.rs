@@ -666,14 +666,36 @@ impl ThreadManager {
         &self,
         options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
-        self.start_thread_with_options_and_fork_source(options, /*forked_from_thread_id*/ None)
-            .await
+        self.start_thread_with_options_and_ids(
+            options, /*forked_from_thread_id*/ None, /*requested_thread_id*/ None,
+        )
+        .await
     }
 
-    async fn start_thread_with_options_and_fork_source(
+    /// Start a fresh thread with an identity durably reserved by a host-owned idempotent API.
+    pub async fn start_thread_with_options_and_id(
+        &self,
+        options: StartThreadOptions,
+        requested_thread_id: ThreadId,
+    ) -> CodexResult<NewThread> {
+        if !requested_thread_id.is_uuid_v7() {
+            return Err(CodexErr::InvalidRequest(
+                "host-reserved thread identity must be UUIDv7".to_string(),
+            ));
+        }
+        self.start_thread_with_options_and_ids(
+            options,
+            /*forked_from_thread_id*/ None,
+            Some(requested_thread_id),
+        )
+        .await
+    }
+
+    async fn start_thread_with_options_and_ids(
         &self,
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+        requested_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
@@ -702,6 +724,7 @@ impl ThreadManager {
             options.thread_extension_init,
             options.supports_openai_form_elicitation,
             /*user_shell_override*/ None,
+            requested_thread_id,
         ))
         .await
     }
@@ -739,8 +762,12 @@ impl ThreadManager {
                 inherited_multi_agent_version,
             ),
         );
-        self.start_thread_with_options_and_fork_source(options, Some(forked_from_thread_id))
-            .await
+        self.start_thread_with_options_and_ids(
+            options,
+            Some(forked_from_thread_id),
+            /*requested_thread_id*/ None,
+        )
+        .await
     }
 
     pub async fn resume_thread_from_rollout(
@@ -828,6 +855,7 @@ impl ThreadManager {
             /*thread_extension_init*/ ExtensionDataInit::default(),
             supports_openai_form_elicitation,
             /*user_shell_override*/ None,
+            /*requested_thread_id*/ None,
         ))
         .await
     }
@@ -899,6 +927,7 @@ impl ThreadManager {
             /*thread_extension_init*/ ExtensionDataInit::default(),
             supports_openai_form_elicitation,
             /*user_shell_override*/ Some(user_shell_override),
+            /*requested_thread_id*/ None,
         ))
         .await
     }
@@ -1027,6 +1056,37 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             supports_openai_form_elicitation,
+            /*requested_thread_id*/ None,
+        )
+        .await
+    }
+
+    pub async fn fork_thread_from_history_with_id<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        supports_openai_form_elicitation: bool,
+        requested_thread_id: ThreadId,
+    ) -> CodexResult<NewThread>
+    where
+        S: Into<ForkSnapshot>,
+    {
+        if !requested_thread_id.is_uuid_v7() {
+            return Err(CodexErr::InvalidRequest(
+                "host-reserved thread identity must be UUIDv7".to_string(),
+            ));
+        }
+        self.fork_thread_with_initial_history(
+            snapshot.into(),
+            config,
+            history,
+            thread_source,
+            parent_trace,
+            supports_openai_form_elicitation,
+            Some(requested_thread_id),
         )
         .await
     }
@@ -1039,6 +1099,7 @@ impl ThreadManager {
         thread_source: Option<ThreadSource>,
         parent_trace: Option<W3cTraceContext>,
         supports_openai_form_elicitation: bool,
+        requested_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
         // `forked_from_id()` describes this history's existing lineage. When
         // forking a resumed thread, the child copies the resumed thread itself.
@@ -1065,7 +1126,7 @@ impl ThreadManager {
             &config.cwd,
         );
         let agent_control = self.agent_control_for_config(&config);
-        Box::pin(self.state.spawn_thread(
+        Box::pin(self.state.spawn_thread_with_requested_id(
             config,
             history,
             Arc::clone(&self.state.auth_manager),
@@ -1080,6 +1141,7 @@ impl ThreadManager {
             /*thread_extension_init*/ ExtensionDataInit::default(),
             supports_openai_form_elicitation,
             /*user_shell_override*/ None,
+            requested_thread_id,
         ))
         .await
     }
@@ -1404,6 +1466,7 @@ impl ThreadManagerState {
             /*thread_extension_init*/ ExtensionDataInit::default(),
             /*supports_openai_form_elicitation*/ false,
             /*user_shell_override*/ None,
+            /*requested_thread_id*/ None,
         ))
         .await
     }
@@ -1444,6 +1507,7 @@ impl ThreadManagerState {
             /*thread_extension_init*/ ExtensionDataInit::default(),
             /*supports_openai_form_elicitation*/ false,
             /*user_shell_override*/ None,
+            /*requested_thread_id*/ None,
         ))
         .await
     }
@@ -1486,6 +1550,7 @@ impl ThreadManagerState {
             thread_extension_init,
             /*supports_openai_form_elicitation*/ false,
             /*user_shell_override*/ None,
+            /*requested_thread_id*/ None,
         ))
         .await
     }
@@ -1509,6 +1574,45 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        self.spawn_thread_with_requested_id(
+            config,
+            initial_history,
+            auth_manager,
+            agent_control,
+            parent_thread_id,
+            forked_from_thread_id,
+            thread_source,
+            dynamic_tools,
+            metrics_service_name,
+            parent_trace,
+            environments,
+            thread_extension_init,
+            supports_openai_form_elicitation,
+            user_shell_override,
+            /*requested_thread_id*/ None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn spawn_thread_with_requested_id(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        agent_control: AgentControl,
+        parent_thread_id: Option<ThreadId>,
+        forked_from_thread_id: Option<ThreadId>,
+        thread_source: Option<ThreadSource>,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+        metrics_service_name: Option<String>,
+        parent_trace: Option<W3cTraceContext>,
+        environments: Vec<TurnEnvironmentSelection>,
+        thread_extension_init: ExtensionDataInit,
+        supports_openai_form_elicitation: bool,
+        user_shell_override: Option<crate::shell::Shell>,
+        requested_thread_id: Option<ThreadId>,
+    ) -> CodexResult<NewThread> {
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
@@ -1529,6 +1633,7 @@ impl ThreadManagerState {
             thread_extension_init,
             supports_openai_form_elicitation,
             user_shell_override,
+            requested_thread_id,
         ))
         .await
     }
@@ -1555,6 +1660,7 @@ impl ThreadManagerState {
         thread_extension_init: ExtensionDataInit,
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
+        requested_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
         if let InitialHistory::Resumed(resumed) = &initial_history {
@@ -1640,6 +1746,7 @@ impl ThreadManagerState {
             attestation_provider: self.attestation_provider.clone(),
             external_time_provider: self.external_time_provider.clone(),
             inherited_multi_agent_version: multi_agent_version,
+            requested_thread_id,
         }))
         .await?;
         let new_thread = self

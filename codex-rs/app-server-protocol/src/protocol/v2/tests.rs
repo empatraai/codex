@@ -4008,6 +4008,37 @@ fn thread_start_params_round_trip_multi_agent_mode() {
 }
 
 #[test]
+fn empatra_atomic_create_and_start_round_trips_stable_operation_identity() {
+    let params: super::EmpatraThreadCreateAndStartParams =
+        serde_json::from_value(serde_json::json!({
+            "operationId": "workspace-command-1",
+            "issuedAtMs": 1700000000000_i64,
+            "thread": {
+                "model": "gpt-5",
+                "cwd": "/tmp/project",
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access"
+            },
+            "turn": {
+                "input": [{ "type": "text", "text": "Start atomically" }],
+                "model": "gpt-5",
+                "effort": "high",
+                "approvalPolicy": "never",
+                "sandboxPolicy": { "type": "dangerFullAccess" }
+            }
+        }))
+        .expect("Empatra atomic create params deserialize");
+
+    assert_eq!(params.operation_id, "workspace-command-1");
+    assert_eq!(params.thread.model.as_deref(), Some("gpt-5"));
+    assert_eq!(params.turn.input.len(), 1);
+    assert_eq!(
+        serde_json::to_value(params).expect("Empatra atomic create params serialize")["operationId"],
+        "workspace-command-1"
+    );
+}
+
+#[test]
 fn thread_settings_update_params_preserve_explicit_null_service_tier() {
     let params: ThreadSettingsUpdateParams = serde_json::from_value(json!({
         "threadId": "thread_123",

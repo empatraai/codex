@@ -141,6 +141,27 @@ pub(super) async fn ensure_conversation_listener(
     connection_id: ConnectionId,
     raw_events_enabled: bool,
 ) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
+    ensure_conversation_listener_with_initial_events(
+        listener_task_context,
+        conversation_id,
+        connection_id,
+        raw_events_enabled,
+        Vec::new(),
+    )
+    .await
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "listener subscription must be serialized against pending unloads"
+)]
+pub(super) async fn ensure_conversation_listener_with_initial_events(
+    listener_task_context: ListenerTaskContext,
+    conversation_id: ThreadId,
+    connection_id: ConnectionId,
+    raw_events_enabled: bool,
+    initial_events: Vec<Event>,
+) -> Result<EnsureConversationListenerResult, JSONRPCErrorError> {
     let conversation = match listener_task_context
         .thread_manager
         .get_thread(conversation_id)
@@ -174,6 +195,7 @@ pub(super) async fn ensure_conversation_listener(
         conversation_id,
         conversation,
         thread_state,
+        initial_events,
     )
     .await
     {
@@ -215,6 +237,7 @@ pub(super) async fn ensure_listener_task_running(
     conversation_id: ThreadId,
     conversation: Arc<CodexThread>,
     thread_state: Arc<Mutex<ThreadState>>,
+    initial_events: Vec<Event>,
 ) -> Result<(), JSONRPCErrorError> {
     let (cancel_tx, mut cancel_rx) = oneshot::channel();
     let Some(mut unloading_state) = UnloadingState::new(
@@ -273,6 +296,21 @@ pub(super) async fn ensure_listener_task_running(
         codex_home,
         ..
     } = listener_task_context;
+    for event in initial_events {
+        publish_thread_event(
+            conversation_id,
+            &conversation,
+            &thread_manager,
+            &thread_state_manager,
+            &thread_state,
+            &thread_watch_manager,
+            &outgoing,
+            &thread_list_state_permit,
+            &fallback_model_provider,
+            event,
+        )
+        .await;
+    }
     let outgoing_for_task = Arc::clone(&outgoing);
     tokio::spawn(async move {
         loop {
@@ -308,48 +346,18 @@ pub(super) async fn ensure_listener_task_running(
                         }
                     };
 
-                    // Track the event before emitting any typed translations
-                    // so thread-local state such as raw event opt-in stays
-                    // synchronized with the conversation.
-                    let raw_events_enabled = {
-                        let mut thread_state = thread_state.lock().await;
-                        thread_state.track_current_turn_event(&event.id, &event.msg);
-                        thread_state.experimental_raw_events
-                    };
-                    let subscribed_connection_ids = thread_state_manager
-                        .subscribed_connection_ids(conversation_id)
-                        .await;
-                    let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
-                        outgoing_for_task.clone(),
-                        subscribed_connection_ids,
+                    publish_thread_event(
                         conversation_id,
-                    );
-
-                    if let EventMsg::RawResponseItem(raw_response_item_event) = &event.msg
-                        && !raw_events_enabled
-                    {
-                        maybe_emit_hook_prompt_item_completed(
-                            conversation_id,
-                            &event.id,
-                            &raw_response_item_event.item,
-                            &thread_outgoing,
-                        )
-                        .await;
-                        continue;
-                    }
-
-                    apply_bespoke_event_handling(
-                        event.clone(),
-                        conversation_id,
-                        conversation.clone(),
-                        thread_manager.clone(),
-                        thread_outgoing,
-                        thread_state.clone(),
-                        thread_watch_manager.clone(),
-                        thread_list_state_permit.clone(),
-                        fallback_model_provider.clone(),
-                    )
-                    .await;
+                        &conversation,
+                        &thread_manager,
+                        &thread_state_manager,
+                        &thread_state,
+                        &thread_watch_manager,
+                        &outgoing_for_task,
+                        &thread_list_state_permit,
+                        &fallback_model_provider,
+                        event,
+                    ).await;
                 }
                 unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
                     if !unloading_watchers_open {
@@ -394,6 +402,58 @@ pub(super) async fn ensure_listener_task_running(
         }
     });
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_thread_event(
+    conversation_id: ThreadId,
+    conversation: &Arc<CodexThread>,
+    thread_manager: &Arc<ThreadManager>,
+    thread_state_manager: &ThreadStateManager,
+    thread_state: &Arc<Mutex<ThreadState>>,
+    thread_watch_manager: &ThreadWatchManager,
+    outgoing: &Arc<OutgoingMessageSender>,
+    thread_list_state_permit: &Arc<Semaphore>,
+    fallback_model_provider: &str,
+    event: Event,
+) {
+    let raw_events_enabled = {
+        let mut thread_state = thread_state.lock().await;
+        thread_state.track_current_turn_event(&event.id, &event.msg);
+        thread_state.experimental_raw_events
+    };
+    let subscribed_connection_ids = thread_state_manager
+        .subscribed_connection_ids(conversation_id)
+        .await;
+    let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
+        outgoing.clone(),
+        subscribed_connection_ids,
+        conversation_id,
+    );
+    if let EventMsg::RawResponseItem(raw_response_item_event) = &event.msg
+        && !raw_events_enabled
+    {
+        maybe_emit_hook_prompt_item_completed(
+            conversation_id,
+            &event.id,
+            &raw_response_item_event.item,
+            &thread_outgoing,
+        )
+        .await;
+        return;
+    }
+    apply_bespoke_event_handling(
+        event,
+        conversation_id,
+        conversation.clone(),
+        thread_manager.clone(),
+        thread_outgoing,
+        thread_state.clone(),
+        thread_watch_manager.clone(),
+        thread_list_state_permit.clone(),
+        fallback_model_provider.to_string(),
+    )
+    .await;
 }
 
 pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {

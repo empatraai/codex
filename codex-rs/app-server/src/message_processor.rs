@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 
 use crate::attestation::app_server_attestation_provider;
@@ -20,6 +22,8 @@ use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::RequestContext;
 use crate::request_processors::AccountRequestProcessor;
 use crate::request_processors::AppsRequestProcessor;
+use crate::request_processors::AtomicInitialEvidence;
+use crate::request_processors::AtomicStartedThread;
 use crate::request_processors::CatalogRequestProcessor;
 use crate::request_processors::CommandExecRequestProcessor;
 use crate::request_processors::ConfigRequestProcessor;
@@ -55,8 +59,13 @@ use codex_app_server_protocol::ChatgptAuthTokensRefreshReason;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshResponse;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ClientRequestSerializationScope;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::ConfigWarningNotification;
+use codex_app_server_protocol::EmpatraThreadCreateAndStartParams;
+use codex_app_server_protocol::EmpatraThreadCreateAndStartResponse;
+use codex_app_server_protocol::EmpatraThreadForkAndStartParams;
+use codex_app_server_protocol::EmpatraThreadForkAndStartResponse;
 use codex_app_server_protocol::ExperimentalApi;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -80,9 +89,14 @@ use codex_login::auth::ExternalAuthRefreshReason;
 use codex_login::auth::ExternalAuthTokens;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode as LoginAuthMode;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::StateDbHandle;
+use codex_state::EmpatraAtomicOperationClaim;
+use codex_state::EmpatraAtomicOperationRecord;
+use codex_state::EmpatraAtomicOperationState;
 use codex_state::log_db::LogDbLayer;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
@@ -94,6 +108,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::models_refresh_worker::ModelsRefreshWorker;
+
+mod empatra_atomic_coordinator;
+use empatra_atomic_coordinator::EmpatraAtomicCoordinator;
 
 const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
@@ -209,6 +226,7 @@ pub(crate) struct MessageProcessor {
     turn_processor: TurnRequestProcessor,
     windows_sandbox_processor: WindowsSandboxRequestProcessor,
     request_serialization_queues: RequestSerializationQueues,
+    empatra_atomic_coordinator: EmpatraAtomicCoordinator,
 }
 
 #[derive(Debug)]
@@ -327,6 +345,8 @@ impl MessageProcessor {
             remote_control_handle,
             plugin_startup_tasks,
         } = args;
+        let empatra_installation_id = installation_id.clone();
+        let message_processor_state_db = state_db.clone();
         auth_manager.set_external_auth(Arc::new(ExternalAuthRefreshBridge {
             outgoing: outgoing.clone(),
         }));
@@ -509,6 +529,7 @@ impl MessageProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             Arc::clone(&skills_watcher),
+            state_db.clone(),
         );
         if matches!(plugin_startup_tasks, crate::PluginStartupTasks::Start) {
             // Keep plugin startup warmups aligned at app-server startup.
@@ -551,6 +572,12 @@ impl MessageProcessor {
             Arc::clone(&config),
             config_manager,
         );
+        let empatra_atomic_coordinator = EmpatraAtomicCoordinator::new(
+            empatra_installation_id,
+            message_processor_state_db.clone(),
+            thread_processor.clone(),
+            turn_processor.clone(),
+        );
 
         Self {
             outgoing,
@@ -578,6 +605,7 @@ impl MessageProcessor {
             turn_processor,
             windows_sandbox_processor,
             request_serialization_queues: RequestSerializationQueues::default(),
+            empatra_atomic_coordinator,
         }
     }
 
@@ -856,6 +884,12 @@ impl MessageProcessor {
                         },
                     )
                     .await;
+                self.empatra_atomic_coordinator
+                    .drain_pending_empatra_publications(
+                        &connection_request_id,
+                        session.supports_openai_form_elicitation(),
+                    )
+                    .await?;
             }
             return Ok(());
         }
@@ -884,6 +918,13 @@ impl MessageProcessor {
             && !session.experimental_api_enabled()
         {
             return Err(invalid_request(experimental_required_message(reason)));
+        }
+        if let Some(ClientRequestSerializationScope::Thread { thread_id }) =
+            codex_request.serialization_scope()
+        {
+            self.thread_processor
+                .ensure_thread_published(&thread_id)
+                .await?;
         }
         let connection_id = connection_request_id.connection_id;
         self.initialize_processor.track_initialized_request(
@@ -1114,6 +1155,18 @@ impl MessageProcessor {
                     )
                     .await
             }
+            ClientRequest::EmpatraThreadCreateAndStart { params, .. } => {
+                self.empatra_atomic_coordinator
+                    .empatra_thread_create_and_start(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
+                        supports_openai_form_elicitation,
+                        request_context,
+                    )
+                    .await
+            }
             ClientRequest::ThreadUnsubscribe { params, .. } => {
                 self.thread_processor
                     .thread_unsubscribe(&request_id, params)
@@ -1139,6 +1192,17 @@ impl MessageProcessor {
                         app_server_client_name.clone(),
                         client_version.clone(),
                         /*supports_openai_form_elicitation*/
+                        supports_openai_form_elicitation,
+                    )
+                    .await
+            }
+            ClientRequest::EmpatraThreadForkAndStart { params, .. } => {
+                self.empatra_atomic_coordinator
+                    .empatra_thread_fork_and_start(
+                        request_id.clone(),
+                        params,
+                        app_server_client_name.clone(),
+                        client_version.clone(),
                         supports_openai_form_elicitation,
                     )
                     .await

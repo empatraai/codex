@@ -504,19 +504,29 @@ async fn run_hooks_and_record_inputs(
             blocked_input = true;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
-            if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
-                accepted_user_input = true;
-            }
-            record_pending_input(
+            let is_user_input =
+                matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty());
+            if !record_pending_input(
                 sess,
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
             )
-            .await;
+            .await
+            {
+                return true;
+            }
+            if is_user_input {
+                accepted_user_input = true;
+            }
         }
     }
-    blocked_input && !accepted_user_input
+    let should_stop = blocked_input && !accepted_user_input;
+    if should_stop {
+        sess.fail_atomic_initial_turn_receipt(&turn_context.sub_id, "initial_input_blocked")
+            .await;
+    }
+    should_stop
 }
 
 #[instrument(level = "trace", skip_all)]

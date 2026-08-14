@@ -268,6 +268,24 @@ impl CodexThread {
             .await
     }
 
+    pub async fn submit_user_input_with_id(
+        &self,
+        id: String,
+        op: Op,
+        trace: Option<W3cTraceContext>,
+        client_user_message_id: Option<String>,
+    ) -> CodexResult<()> {
+        self.codex
+            .session
+            .services
+            .agent_control
+            .ensure_execution_capacity_for_op(self.session_configured.thread_id, &op)
+            .await?;
+        self.codex
+            .submit_user_input_with_id(id, op, trace, client_user_message_id)
+            .await
+    }
+
     /// Persist whether this thread is eligible for future memory generation.
     pub async fn set_thread_memory_mode(&self, mode: ThreadMemoryMode) -> anyhow::Result<()> {
         self.codex.set_thread_memory_mode(mode).await
@@ -407,6 +425,14 @@ impl CodexThread {
     /// Use sparingly: this is intended to be removed soon.
     pub async fn submit_with_id(&self, sub: Submission) -> CodexResult<()> {
         self.codex.submit_with_id(sub).await
+    }
+
+    pub async fn submit_atomic_initial_turn_with_id(
+        &self,
+        sub: Submission,
+    ) -> CodexResult<tokio::sync::oneshot::Receiver<Result<tokio::sync::oneshot::Sender<()>, String>>>
+    {
+        self.codex.submit_atomic_initial_turn_with_id(sub).await
     }
 
     pub async fn next_event(&self) -> CodexResult<Event> {

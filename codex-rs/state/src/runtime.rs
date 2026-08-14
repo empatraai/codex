@@ -76,6 +76,7 @@ use tracing::warn;
 
 mod agent_jobs;
 mod backfill;
+mod empatra_atomic_operations;
 mod external_agent_config_imports;
 mod goals;
 mod logs;
@@ -87,6 +88,10 @@ mod swarm;
 mod test_support;
 mod threads;
 
+pub use empatra_atomic_operations::EmpatraAtomicOperationClaim;
+pub use empatra_atomic_operations::EmpatraAtomicOperationRecord;
+pub use empatra_atomic_operations::EmpatraAtomicOperationState;
+pub use empatra_atomic_operations::EmpatraAtomicPublication;
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
@@ -113,6 +118,11 @@ pub use threads::ThreadFilterOptions;
 // metadata, rather than the exact sum of all persisted SQLite column bytes.
 const LOG_PARTITION_SIZE_LIMIT_BYTES: i64 = 10 * 1024 * 1024;
 const LOG_PARTITION_ROW_LIMIT: i64 = 1_000;
+const EMPATRA_ATOMIC_AUTHORITY_MARKER: &str = "empatra-atomic-state-required";
+
+pub fn empatra_atomic_authority_marker_path(sqlite_home: &Path) -> PathBuf {
+    sqlite_home.join(EMPATRA_ATOMIC_AUTHORITY_MARKER)
+}
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {

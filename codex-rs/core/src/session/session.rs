@@ -21,6 +21,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 
 /// Context for an initialized model agent
 ///
@@ -44,6 +45,10 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    /// Positive persistence receipts requested by the Empatra atomic first-turn API.
+    /// Ordinary submissions never enter this map and retain upstream event semantics.
+    pub(crate) atomic_initial_turn_receipts:
+        Mutex<HashMap<String, oneshot::Sender<Result<oneshot::Sender<()>, String>>>>,
     pub(crate) services: SessionServices,
     pub(super) next_internal_sub_id: AtomicU64,
 }
@@ -506,6 +511,7 @@ impl Session {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         external_time_provider: Option<Arc<dyn TimeProvider>>,
         multi_agent_version: Option<MultiAgentVersion>,
+        requested_thread_id: Option<ThreadId>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -525,7 +531,7 @@ impl Session {
 
         let thread_id = match &initial_history {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                ThreadId::default()
+                requested_thread_id.unwrap_or_default()
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };
@@ -1142,6 +1148,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                atomic_initial_turn_receipts: Mutex::new(HashMap::new()),
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
             });

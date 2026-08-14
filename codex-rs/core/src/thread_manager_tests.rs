@@ -500,6 +500,74 @@ async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
 }
 
 #[tokio::test]
+async fn start_thread_uses_a_host_reserved_uuidv7_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let requested = ThreadId::from_string("018bcfe5-6800-7000-8000-000000000001")
+        .expect("valid UUIDv7 thread id");
+    let invalid = ThreadId::from_string("67e55044-10b1-426f-9247-bb680e5fe0c8")
+        .expect("valid UUIDv4 thread id");
+    let rejected = match manager
+        .start_thread_with_options_and_id(
+            StartThreadOptions {
+                config: config.clone(),
+                allow_provider_model_fallback: false,
+                initial_history: InitialHistory::New,
+                history_mode: None,
+                session_source: None,
+                thread_source: None,
+                dynamic_tools: Vec::new(),
+                metrics_service_name: None,
+                parent_trace: None,
+                environments: Vec::new(),
+                thread_extension_init: Default::default(),
+                supports_openai_form_elicitation: false,
+            },
+            invalid,
+        )
+        .await
+    {
+        Ok(_) => panic!("UUIDv4 reservation must be rejected"),
+        Err(error) => error,
+    };
+    assert!(rejected.to_string().contains("UUIDv7"));
+    let started = manager
+        .start_thread_with_options_and_id(
+            StartThreadOptions {
+                config,
+                allow_provider_model_fallback: false,
+                initial_history: InitialHistory::New,
+                history_mode: None,
+                session_source: None,
+                thread_source: None,
+                dynamic_tools: Vec::new(),
+                metrics_service_name: None,
+                parent_trace: None,
+                environments: Vec::new(),
+                thread_extension_init: Default::default(),
+                supports_openai_form_elicitation: false,
+            },
+            requested,
+        )
+        .await
+        .expect("reserved thread should start");
+
+    assert_eq!(started.thread_id, requested);
+    manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+}
+
+#[tokio::test]
 async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() {
     struct InitialDataRecorder {
         lifecycle_observed: Arc<std::sync::Mutex<Vec<(String, String)>>>,

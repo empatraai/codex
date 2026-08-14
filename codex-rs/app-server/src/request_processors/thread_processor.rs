@@ -5,6 +5,7 @@ use codex_extension_api::ExtensionDataInit;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_protocol::models::ContentItem;
 use codex_protocol::protocol::ThreadHistoryMode;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
@@ -377,6 +378,17 @@ enum RunningThreadResumeResult {
     NotRunning(Option<Box<StoredThread>>),
 }
 
+pub(crate) struct AtomicStartedThread {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) thread: Arc<CodexThread>,
+}
+
+pub(crate) enum AtomicInitialEvidence {
+    Absent,
+    Partial,
+    Complete(Vec<Event>),
+}
+
 impl ThreadRequestProcessor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -416,6 +428,30 @@ impl ThreadRequestProcessor {
         }
     }
 
+    /// Admit a thread through the ordinary app-server surface only after Empatra's
+    /// atomic publication transaction has committed. Atomic reconciliation and
+    /// cleanup intentionally call private storage/manager methods instead.
+    pub(crate) async fn ensure_thread_published(
+        &self,
+        thread_id: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        let Some(state_db) = self.state_db.as_ref() else {
+            // Production startup always supplies the state DB or fails. `None` is
+            // retained for in-memory test processors, which have no persisted atomic rollouts.
+            return Ok(());
+        };
+        if state_db
+            .is_empatra_atomic_thread_reserved(thread_id)
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to check thread publication state: {error}"))
+            })?
+        {
+            return Err(invalid_request(format!("thread not found: {thread_id}")));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn thread_start(
         &self,
         request_id: ConnectionRequestId,
@@ -432,9 +468,183 @@ impl ThreadRequestProcessor {
             app_server_client_version,
             supports_openai_form_elicitation,
             request_context,
+            /*requested_thread_id*/ None,
         )
         .await
-        .map(|()| None)
+        .map(|_| None)
+    }
+
+    pub(crate) async fn empatra_thread_start(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadStartParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        supports_openai_form_elicitation: bool,
+        request_context: RequestContext,
+        requested_thread_id: ThreadId,
+    ) -> Result<AtomicStartedThread, JSONRPCErrorError> {
+        self.thread_start_inner(
+            request_id,
+            params,
+            app_server_client_name,
+            app_server_client_version,
+            supports_openai_form_elicitation,
+            request_context,
+            Some(requested_thread_id),
+        )
+        .await?
+        .ok_or_else(|| internal_error("atomic thread start did not return its thread"))
+    }
+
+    pub(crate) async fn empatra_loaded_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<AtomicStartedThread, JSONRPCErrorError> {
+        let thread = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
+        Ok(AtomicStartedThread { thread_id, thread })
+    }
+
+    pub(crate) async fn reconcile_empatra_atomic_thread(
+        &self,
+        request_id: &ConnectionRequestId,
+        thread_id: ThreadId,
+        turn_id: &str,
+        expected_initial_input: Option<&[V2UserInput]>,
+        supports_openai_form_elicitation: bool,
+    ) -> Result<(AtomicStartedThread, AtomicInitialEvidence), JSONRPCErrorError> {
+        let mut stored_thread = self
+            .read_stored_thread_for_resume(
+                &thread_id.to_string(),
+                /*path*/ None,
+                /*include_history*/ true,
+            )
+            .await?;
+        let initial_event_bundle = expected_initial_input
+            .and_then(|expected_input| {
+                stored_thread.history.as_ref().map(|history| {
+                    atomic_initial_event_bundle(&history.items, turn_id, expected_input)
+                })
+            })
+            .unwrap_or(AtomicInitialEvidence::Absent);
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            return Ok((
+                AtomicStartedThread { thread_id, thread },
+                initial_event_bundle,
+            ));
+        }
+        let thread_history = self
+            .stored_thread_to_initial_history(&mut stored_thread)
+            .await?;
+        let history_cwd = thread_history.session_cwd();
+        let mut request_overrides = None;
+        let mut typesafe_overrides = ConfigOverrides::default();
+        self.load_and_apply_persisted_resume_metadata(
+            &thread_history,
+            &mut request_overrides,
+            &mut typesafe_overrides,
+        )
+        .await;
+        let config = self
+            .config_manager
+            .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
+            .await
+            .map_err(|error| config_load_error(&error))?;
+        let NewThread {
+            thread_id: resumed_thread_id,
+            thread,
+            ..
+        } = self
+            .thread_manager
+            .resume_thread_with_history(
+                config,
+                thread_history,
+                self.auth_manager.clone(),
+                self.request_trace_context(request_id).await,
+                supports_openai_form_elicitation,
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to resume atomic thread: {error}")))?;
+        if resumed_thread_id != thread_id {
+            return Err(internal_error(format!(
+                "atomic resume returned {resumed_thread_id}, expected {thread_id}"
+            )));
+        }
+        Ok((
+            AtomicStartedThread { thread_id, thread },
+            initial_event_bundle,
+        ))
+    }
+
+    pub(crate) async fn verify_empatra_atomic_initial_turn(
+        &self,
+        thread_id: ThreadId,
+        turn_id: &str,
+        expected_input: &[V2UserInput],
+    ) -> Result<Vec<Event>, JSONRPCErrorError> {
+        let stored = self
+            .read_stored_thread_for_resume(
+                &thread_id.to_string(),
+                /*path*/ None,
+                /*include_history*/ true,
+            )
+            .await?;
+        stored
+            .history
+            .as_ref()
+            .map(|history| atomic_initial_event_bundle(&history.items, turn_id, expected_input))
+            .and_then(|evidence| match evidence {
+                AtomicInitialEvidence::Complete(events) => Some(events),
+                AtomicInitialEvidence::Absent | AtomicInitialEvidence::Partial => None,
+            })
+            .ok_or_else(|| {
+                internal_error(format!(
+                    "atomic initial turn {turn_id} is not durably reconstructable"
+                ))
+            })
+    }
+
+    pub(crate) async fn publish_empatra_atomic_thread(
+        &self,
+        connection_id: ConnectionId,
+        started: AtomicStartedThread,
+        initial_events: Vec<Event>,
+    ) -> Result<(), JSONRPCErrorError> {
+        let config_snapshot = started.thread.config_snapshot().await;
+        let session_configured = started.thread.session_configured();
+        let mut api_thread = build_thread_from_snapshot(
+            started.thread_id,
+            session_configured.session_id.to_string(),
+            &config_snapshot,
+            session_configured.rollout_path,
+        );
+        self.thread_watch_manager
+            .upsert_thread_silently(api_thread.clone())
+            .await;
+        api_thread.status = empatra_publication_status(
+            self.thread_watch_manager
+                .loaded_status_for_thread(&api_thread.id)
+                .await,
+            &started.thread.agent_status().await,
+        );
+        self.outgoing
+            .send_server_notification(ServerNotification::ThreadStarted(
+                thread_started_notification(api_thread),
+            ))
+            .await;
+        super::thread_lifecycle::ensure_conversation_listener_with_initial_events(
+            self.listener_task_context(),
+            started.thread_id,
+            connection_id,
+            /*raw_events_enabled*/ false,
+            initial_events,
+        )
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn thread_unsubscribe(
@@ -480,9 +690,31 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             supports_openai_form_elicitation,
+            /*requested_thread_id*/ None,
         )
         .await
-        .map(|()| None)
+        .map(|_| None)
+    }
+
+    pub(crate) async fn empatra_thread_fork(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadForkParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        supports_openai_form_elicitation: bool,
+        requested_thread_id: ThreadId,
+    ) -> Result<AtomicStartedThread, JSONRPCErrorError> {
+        self.thread_fork_inner(
+            request_id,
+            params,
+            app_server_client_name,
+            app_server_client_version,
+            supports_openai_form_elicitation,
+            Some(requested_thread_id),
+        )
+        .await?
+        .ok_or_else(|| internal_error("atomic thread fork did not return its thread"))
     }
 
     pub(crate) async fn thread_archive(
@@ -690,6 +922,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadReadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.ensure_thread_published(&params.thread_id).await?;
         self.thread_read_response_inner(params)
             .await
             .map(|response| Some(response.into()))
@@ -699,6 +932,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadTurnsListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.ensure_thread_published(&params.thread_id).await?;
         self.thread_turns_list_response_inner(params)
             .await
             .map(|response| Some(response.into()))
@@ -708,6 +942,7 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadItemsListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.ensure_thread_published(&params.thread_id).await?;
         self.thread_items_list_response_inner(params)
             .await
             .map(|response| Some(response.into()))
@@ -749,6 +984,7 @@ impl ThreadRequestProcessor {
         // Resolve the core conversation handle from a v2 thread id string.
         let thread_id = ThreadId::from_string(thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&thread_id.to_string()).await?;
 
         let thread = self
             .thread_manager
@@ -758,6 +994,7 @@ impl ThreadRequestProcessor {
 
         Ok((thread_id, thread))
     }
+
     pub(super) async fn acquire_thread_list_state_permit(
         &self,
     ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
@@ -808,6 +1045,7 @@ impl ThreadRequestProcessor {
     ) -> Result<ThreadUnsubscribeResponse, JSONRPCErrorError> {
         let thread_id = ThreadId::from_string(&params.thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&params.thread_id).await?;
 
         if self.thread_manager.get_thread(thread_id).await.is_err() {
             self.finalize_thread_teardown(thread_id).await;
@@ -892,6 +1130,7 @@ impl ThreadRequestProcessor {
             conversation_id,
             conversation,
             thread_state,
+            /*initial_events*/ Vec::new(),
         )
         .await
     }
@@ -904,7 +1143,8 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
         request_context: RequestContext,
-    ) -> Result<(), JSONRPCErrorError> {
+        requested_thread_id: Option<ThreadId>,
+    ) -> Result<Option<AtomicStartedThread>, JSONRPCErrorError> {
         let ThreadStartParams {
             model,
             model_provider,
@@ -968,6 +1208,30 @@ impl ThreadRequestProcessor {
         };
         let request_trace = request_context.request_trace();
         let config_manager = self.config_manager.clone();
+        if let Some(requested_thread_id) = requested_thread_id {
+            return Self::thread_start_task(
+                listener_task_context,
+                config_manager,
+                request_id,
+                app_server_client_name,
+                app_server_client_version,
+                supports_openai_form_elicitation,
+                config,
+                typesafe_overrides,
+                dynamic_tools,
+                selected_capability_roots.unwrap_or_default(),
+                history_mode.map(Into::into),
+                session_start_source,
+                thread_source.map(Into::into),
+                environment_selections,
+                service_name,
+                allow_provider_model_fallback,
+                experimental_raw_events,
+                request_trace,
+                Some(requested_thread_id),
+            )
+            .await;
+        }
         let outgoing = Arc::clone(&listener_task_context.outgoing);
         let error_request_id = request_id.clone();
         let thread_start_task = async move {
@@ -990,6 +1254,7 @@ impl ThreadRequestProcessor {
                 allow_provider_model_fallback,
                 experimental_raw_events,
                 request_trace,
+                /*requested_thread_id*/ None,
             )
             .await
             {
@@ -998,7 +1263,7 @@ impl ThreadRequestProcessor {
         };
         self.background_tasks
             .spawn(thread_start_task.instrument(request_context.span()));
-        Ok(())
+        Ok(None)
     }
 
     pub(crate) async fn drain_background_tasks(&self) {
@@ -1066,7 +1331,8 @@ impl ThreadRequestProcessor {
         allow_provider_model_fallback: bool,
         experimental_raw_events: bool,
         request_trace: Option<W3cTraceContext>,
-    ) -> Result<(), JSONRPCErrorError> {
+        requested_thread_id: Option<ThreadId>,
+    ) -> Result<Option<AtomicStartedThread>, JSONRPCErrorError> {
         let thread_start_started_at = std::time::Instant::now();
         let requested_cwd = typesafe_overrides.cwd.clone();
         let mut config = config_manager
@@ -1166,38 +1432,77 @@ impl ThreadRequestProcessor {
             thread,
             session_configured,
             ..
-        } = listener_task_context
-            .thread_manager
-            .start_thread_with_options(StartThreadOptions {
-                config,
-                allow_provider_model_fallback,
-                initial_history: match session_start_source
-                    .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
-                {
-                    codex_app_server_protocol::ThreadStartSource::Startup => InitialHistory::New,
-                    codex_app_server_protocol::ThreadStartSource::Clear => InitialHistory::Cleared,
-                },
-                history_mode,
-                session_source: None,
-                thread_source,
-                dynamic_tools,
-                metrics_service_name: service_name,
-                parent_trace: request_trace,
-                environments,
-                thread_extension_init,
-                supports_openai_form_elicitation,
-            })
-            .instrument(tracing::info_span!(
-                "app_server.thread_start.create_thread",
-                otel.name = "app_server.thread_start.create_thread",
-                thread_start.dynamic_tool_count = dynamic_tool_count,
-            ))
-            .await
-            .map_err(|err| match err {
-                CodexErr::InvalidRequest(message) => invalid_request(message),
-                CodexErr::UnsupportedOperation(message) => method_not_found(message),
-                err => internal_error(format!("error creating thread: {err}")),
-            })?;
+        } = async {
+            if let Some(requested_thread_id) = requested_thread_id {
+                listener_task_context
+                    .thread_manager
+                    .start_thread_with_options_and_id(
+                        StartThreadOptions {
+                            config,
+                            allow_provider_model_fallback,
+                            initial_history: match session_start_source
+                                .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
+                            {
+                                codex_app_server_protocol::ThreadStartSource::Startup => {
+                                    InitialHistory::New
+                                }
+                                codex_app_server_protocol::ThreadStartSource::Clear => {
+                                    InitialHistory::Cleared
+                                }
+                            },
+                            history_mode,
+                            session_source: None,
+                            thread_source,
+                            dynamic_tools,
+                            metrics_service_name: service_name,
+                            parent_trace: request_trace,
+                            environments,
+                            thread_extension_init,
+                            supports_openai_form_elicitation,
+                        },
+                        requested_thread_id,
+                    )
+                    .await
+            } else {
+                listener_task_context
+                    .thread_manager
+                    .start_thread_with_options(StartThreadOptions {
+                        config,
+                        allow_provider_model_fallback,
+                        initial_history: match session_start_source
+                            .unwrap_or(codex_app_server_protocol::ThreadStartSource::Startup)
+                        {
+                            codex_app_server_protocol::ThreadStartSource::Startup => {
+                                InitialHistory::New
+                            }
+                            codex_app_server_protocol::ThreadStartSource::Clear => {
+                                InitialHistory::Cleared
+                            }
+                        },
+                        history_mode,
+                        session_source: None,
+                        thread_source,
+                        dynamic_tools,
+                        metrics_service_name: service_name,
+                        parent_trace: request_trace,
+                        environments,
+                        thread_extension_init,
+                        supports_openai_form_elicitation,
+                    })
+                    .await
+            }
+        }
+        .instrument(tracing::info_span!(
+            "app_server.thread_start.create_thread",
+            otel.name = "app_server.thread_start.create_thread",
+            thread_start.dynamic_tool_count = dynamic_tool_count,
+        ))
+        .await
+        .map_err(|err| match err {
+            CodexErr::InvalidRequest(message) => invalid_request(message),
+            CodexErr::UnsupportedOperation(message) => method_not_found(message),
+            err => internal_error(format!("error creating thread: {err}")),
+        })?;
         let session_telemetry = thread.session_telemetry();
         session_telemetry.record_startup_phase(
             "thread_start_create_thread",
@@ -1226,6 +1531,19 @@ impl ThreadRequestProcessor {
             &config_snapshot,
             session_configured.rollout_path.clone(),
         );
+
+        if requested_thread_id.is_some() {
+            return Ok(Some(AtomicStartedThread {
+                thread_id,
+                thread: listener_task_context
+                    .thread_manager
+                    .get_thread(thread_id)
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("atomic thread disappeared: {error}"))
+                    })?,
+            }));
+        }
 
         // Auto-attach a thread listener when starting a thread.
         log_listener_attach_result(
@@ -1314,7 +1632,7 @@ impl ThreadRequestProcessor {
             thread_start_started_at.elapsed(),
             Some("ready"),
         );
-        Ok(())
+        Ok(None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1601,6 +1919,7 @@ impl ThreadRequestProcessor {
 
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&thread_id).await?;
 
         let Some(ThreadMetadataGitInfoUpdateParams {
             sha,
@@ -2143,6 +2462,15 @@ impl ThreadRequestProcessor {
             .into_iter()
             .map(|thread_id| thread_id.to_string())
             .collect();
+        if let Some(state_db) = self.state_db.as_ref() {
+            let reserved = state_db
+                .reserved_empatra_atomic_thread_ids(&data)
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to check thread publication state: {error}"))
+                })?;
+            data.retain(|thread_id| !reserved.contains(thread_id));
+        }
 
         if data.is_empty() {
             return Ok(ThreadLoadedListResponse {
@@ -2189,6 +2517,7 @@ impl ThreadRequestProcessor {
 
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&thread_id).await?;
 
         let thread = self
             .read_thread_view(thread_uuid, include_turns)
@@ -2378,6 +2707,7 @@ impl ThreadRequestProcessor {
         } = params;
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&thread_id).await?;
 
         let items = self
             .load_thread_turns_list_history(thread_uuid)
@@ -2432,6 +2762,7 @@ impl ThreadRequestProcessor {
         } = params;
         let thread_id = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        self.ensure_thread_published(&thread_id.to_string()).await?;
         let page_size = limit
             .map(|value| value as usize)
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
@@ -2580,6 +2911,13 @@ impl ThreadRequestProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        if self
+            .ensure_thread_published(&thread_id.to_string())
+            .await
+            .is_err()
+        {
+            return;
+        }
         let mut raw_events_enabled = false;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
             let config_snapshot = thread.config_snapshot().await;
@@ -2620,6 +2958,12 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
     ) -> Result<(), JSONRPCErrorError> {
+        if !params.thread_id.is_empty()
+            && let Err(error) = self.ensure_thread_published(&params.thread_id).await
+        {
+            self.outgoing.send_error(request_id, error).await;
+            return Ok(());
+        }
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
                 .pending_thread_unloads
@@ -3390,7 +3734,8 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         supports_openai_form_elicitation: bool,
-    ) -> Result<(), JSONRPCErrorError> {
+        requested_thread_id: Option<ThreadId>,
+    ) -> Result<Option<AtomicStartedThread>, JSONRPCErrorError> {
         let ThreadForkParams {
             thread_id,
             path,
@@ -3411,6 +3756,9 @@ impl ThreadRequestProcessor {
             exclude_turns,
         } = params;
         let include_turns = !exclude_turns;
+        if !thread_id.is_empty() {
+            self.ensure_thread_published(&thread_id).await?;
+        }
         if sandbox.is_some() && permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
@@ -3487,28 +3835,45 @@ impl ThreadRequestProcessor {
             thread: forked_thread,
             session_configured,
             ..
-        } = self
-            .thread_manager
-            .fork_thread_from_history(
-                ForkSnapshot::Interrupted,
-                config,
-                InitialHistory::Resumed(ResumedHistory {
-                    conversation_id: source_thread_id,
-                    history: Arc::clone(&history_items),
-                    rollout_path: source_thread.rollout_path.clone(),
-                }),
-                thread_source.map(Into::into),
-                self.request_trace_context(&request_id).await,
-                supports_openai_form_elicitation,
-            )
-            .await
-            .map_err(|err| match err {
-                CodexErr::Io(_) | CodexErr::Json(_) => {
-                    invalid_request(format!("failed to load thread {source_thread_id}: {err}"))
-                }
-                CodexErr::InvalidRequest(message) => invalid_request(message),
-                err => internal_error(format!("error forking thread: {err}")),
-            })?;
+        } = if let Some(requested_thread_id) = requested_thread_id {
+            self.thread_manager
+                .fork_thread_from_history_with_id(
+                    ForkSnapshot::Interrupted,
+                    config,
+                    InitialHistory::Resumed(ResumedHistory {
+                        conversation_id: source_thread_id,
+                        history: Arc::clone(&history_items),
+                        rollout_path: source_thread.rollout_path.clone(),
+                    }),
+                    thread_source.map(Into::into),
+                    self.request_trace_context(&request_id).await,
+                    supports_openai_form_elicitation,
+                    requested_thread_id,
+                )
+                .await
+        } else {
+            self.thread_manager
+                .fork_thread_from_history(
+                    ForkSnapshot::Interrupted,
+                    config,
+                    InitialHistory::Resumed(ResumedHistory {
+                        conversation_id: source_thread_id,
+                        history: Arc::clone(&history_items),
+                        rollout_path: source_thread.rollout_path.clone(),
+                    }),
+                    thread_source.map(Into::into),
+                    self.request_trace_context(&request_id).await,
+                    supports_openai_form_elicitation,
+                )
+                .await
+        }
+        .map_err(|err| match err {
+            CodexErr::Io(_) | CodexErr::Json(_) => {
+                invalid_request(format!("failed to load thread {source_thread_id}: {err}"))
+            }
+            CodexErr::InvalidRequest(message) => invalid_request(message),
+            err => internal_error(format!("error forking thread: {err}")),
+        })?;
 
         Self::set_app_server_client_info(
             forked_thread.as_ref(),
@@ -3530,6 +3895,13 @@ impl ThreadRequestProcessor {
                 )
                 .await
                 .map_err(|err| core_thread_write_error("inherit source thread name", err))?;
+        }
+
+        if requested_thread_id.is_some() {
+            return Ok(Some(AtomicStartedThread {
+                thread_id,
+                thread: forked_thread,
+            }));
         }
 
         let instruction_sources = forked_thread.legacy_instruction_sources().await;
@@ -3651,7 +4023,7 @@ impl ThreadRequestProcessor {
         self.outgoing
             .send_server_notification(ServerNotification::ThreadStarted(notif))
             .await;
-        Ok(())
+        Ok(None)
     }
 
     async fn get_thread_summary_response_inner(
@@ -3806,6 +4178,86 @@ impl ThreadRequestProcessor {
         }
 
         Ok((items, next_cursor))
+    }
+}
+
+fn atomic_initial_event_bundle(
+    items: &[RolloutItem],
+    turn_id: &str,
+    expected_input: &[V2UserInput],
+) -> AtomicInitialEvidence {
+    let expected_core_input = expected_input
+        .iter()
+        .cloned()
+        .map(V2UserInput::into_core)
+        .collect::<Vec<_>>();
+    let expected_content = expected_core_input
+        .iter()
+        .filter_map(|input| match input {
+            CoreInputItem::Text { text, .. } => Some(ContentItem::InputText { text: text.clone() }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_message = expected_input
+        .iter()
+        .map(|input| match input {
+            V2UserInput::Text { text, .. } => text.as_str(),
+            _ => "",
+        })
+        .collect::<String>();
+    let mut within_matching_turn = false;
+    let mut started_count = 0usize;
+    let mut response_count = 0usize;
+    let mut projection_count = 0usize;
+    let mut invalid_evidence = false;
+    let mut matching_turn_evidence = false;
+    let mut events = Vec::new();
+    for item in items {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == turn_id => {
+                within_matching_turn = true;
+                started_count += 1;
+                matching_turn_evidence = true;
+                if started_count == 1 {
+                    events.push(Event {
+                        id: turn_id.to_string(),
+                        msg: EventMsg::TurnStarted(event.clone()),
+                    });
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => within_matching_turn = false,
+            RolloutItem::ResponseItem(response_item)
+                if response_item.turn_id() == Some(turn_id) =>
+            {
+                matching_turn_evidence = true;
+                response_count += 1;
+                invalid_evidence |= !matches!(
+                    response_item,
+                    ResponseItem::Message { role, content, .. }
+                        if within_matching_turn && role == "user" && content == &expected_content
+                );
+            }
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)) if within_matching_turn => {
+                matching_turn_evidence = true;
+                projection_count += 1;
+                invalid_evidence |= event.message != expected_message
+                    || event
+                        .images
+                        .as_ref()
+                        .is_some_and(|images| !images.is_empty())
+                    || !event.local_images.is_empty()
+                    || !event.text_elements.is_empty();
+            }
+            _ => {}
+        }
+    }
+    if !invalid_evidence && started_count == 1 && response_count == 1 && projection_count == 1 {
+        return AtomicInitialEvidence::Complete(events);
+    }
+    if matching_turn_evidence {
+        AtomicInitialEvidence::Partial
+    } else {
+        AtomicInitialEvidence::Absent
     }
 }
 
@@ -4072,6 +4524,13 @@ fn normalize_thread_turns_status(
             turn.status = TurnStatus::Interrupted;
         }
     }
+}
+
+fn empatra_publication_status(
+    loaded_status: ThreadStatus,
+    agent_status: &AgentStatus,
+) -> ThreadStatus {
+    resolve_thread_status(loaded_status, matches!(agent_status, AgentStatus::Running))
 }
 
 enum ThreadReadViewError {
