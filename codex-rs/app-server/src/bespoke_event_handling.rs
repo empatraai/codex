@@ -765,6 +765,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             let params = McpServerElicitationRequestParams {
                 thread_id: conversation_id.to_string(),
                 turn_id,
+                elicitation_identity: request.id.clone().into(),
                 server_name: request.server_name.clone(),
                 request: request_body,
             };

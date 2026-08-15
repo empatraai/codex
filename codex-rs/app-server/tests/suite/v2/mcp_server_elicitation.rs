@@ -109,11 +109,18 @@ async fn mcp_server_form_elicitation_round_trip() -> Result<()> {
             .build()
             .map_err(anyhow::Error::msg)?,
     )?)?;
+    let elicitation_identity = params.elicitation_identity.clone();
+    assert!(matches!(
+        &elicitation_identity,
+        codex_app_server_protocol::McpElicitationIdentity::String(value)
+            if value.starts_with("codex-mcp-elicitation-")
+    ));
     assert_eq!(
         params,
         McpServerElicitationRequestParams {
             thread_id: fixture.thread_id.clone(),
             turn_id: Some(fixture.turn_id.clone()),
+            elicitation_identity,
             server_name: "codex_apps".to_string(),
             request: McpServerElicitationRequest::Form {
                 meta: None,
@@ -133,11 +140,18 @@ async fn mcp_server_form_elicitation_round_trip() -> Result<()> {
 async fn mcp_server_openai_form_elicitation_round_trip() -> Result<()> {
     let mut fixture = ElicitationRoundTripFixture::start(ElicitationScenario::OpenAiForm).await?;
     let (request_id, params) = fixture.read_elicitation().await?;
+    let elicitation_identity = params.elicitation_identity.clone();
+    assert!(matches!(
+        &elicitation_identity,
+        codex_app_server_protocol::McpElicitationIdentity::String(value)
+            if value.starts_with("codex-mcp-elicitation-")
+    ));
     assert_eq!(
         params,
         McpServerElicitationRequestParams {
             thread_id: fixture.thread_id.clone(),
             turn_id: Some(fixture.turn_id.clone()),
+            elicitation_identity,
             server_name: "codex_apps".to_string(),
             request: McpServerElicitationRequest::OpenAiForm {
                 meta: None,

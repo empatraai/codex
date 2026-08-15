@@ -268,18 +268,17 @@ impl App {
                         .unwrap_or_default(),
                 }),
             ),
-            ServerRequest::McpServerElicitationRequest { request_id, params } => {
+            ServerRequest::McpServerElicitationRequest { params, .. } => {
                 if let Some(params) = AppLinkViewParams::from_url_app_server_request(
                     thread_id,
                     &params.server_name,
-                    request_id.clone(),
+                    params.elicitation_identity.clone(),
                     &params.request,
                 ) {
                     Some(ThreadInteractiveRequest::AppLink(params))
                 } else if let Some(request) =
                     McpServerElicitationFormRequest::from_app_server_request(
                         thread_id,
-                        request_id.clone(),
                         params.clone(),
                     )
                 {
@@ -294,7 +293,7 @@ impl App {
                                 thread_id,
                                 thread_label,
                                 server_name: params.server_name.clone(),
-                                request_id: request_id.clone(),
+                                elicitation_identity: params.elicitation_identity.clone(),
                                 message: message.clone(),
                             },
                         )),
@@ -305,7 +304,7 @@ impl App {
                             self.app_event_tx.resolve_elicitation(
                                 thread_id,
                                 params.server_name.clone(),
-                                request_id.clone(),
+                                params.elicitation_identity.clone(),
                                 codex_app_server_protocol::McpServerElicitationAction::Decline,
                                 /*content*/ None,
                                 /*meta*/ None,

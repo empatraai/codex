@@ -8,11 +8,14 @@ use crate::app_server_session::AppServerSession;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::FileChangeRequestApprovalResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_protocol::request_permissions::RequestPermissionProfile as CoreRequestPermissionProfile;
+
+const MAX_WIRE_ALIASES_PER_INTERACTION: usize = 8;
 
 impl App {
     pub(super) async fn reject_app_server_request(
@@ -63,7 +66,7 @@ pub(crate) enum ResolvedAppServerRequest {
     },
     McpElicitation {
         server_name: String,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
     },
 }
 
@@ -74,6 +77,8 @@ pub(super) struct PendingAppServerRequests {
     permissions_approvals: HashMap<String, AppServerRequestId>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+    mcp_request_keys_by_wire_id: HashMap<AppServerRequestId, McpRequestKey>,
+    mcp_wire_ids_by_request_key: HashMap<McpRequestKey, VecDeque<AppServerRequestId>>,
 }
 
 impl PendingAppServerRequests {
@@ -83,6 +88,8 @@ impl PendingAppServerRequests {
         self.permissions_approvals.clear();
         self.user_inputs.clear();
         self.mcp_requests.clear();
+        self.mcp_request_keys_by_wire_id.clear();
+        self.mcp_wire_ids_by_request_key.clear();
     }
 
     pub(super) fn note_server_request(
@@ -131,13 +138,11 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
-                self.mcp_requests.insert(
-                    McpRequestKey {
-                        server_name: params.server_name.clone(),
-                        request_id: request_id.clone(),
-                    },
-                    request_id.clone(),
-                );
+                let key = McpRequestKey {
+                    server_name: params.server_name.clone(),
+                    elicitation_identity: params.elicitation_identity.clone(),
+                };
+                self.retain_mcp_wire_alias(key, request_id.clone());
                 None
             }
             ServerRequest::DynamicToolCall { request_id, .. } => {
@@ -249,15 +254,14 @@ impl PendingAppServerRequests {
                 .transpose()?,
             AppCommand::ResolveElicitation {
                 server_name,
-                request_id,
+                elicitation_identity,
                 decision,
                 content,
                 meta,
             } => self
-                .mcp_requests
-                .remove(&McpRequestKey {
+                .take_mcp_request(&McpRequestKey {
                     server_name: server_name.to_string(),
-                    request_id: request_id.clone(),
+                    elicitation_identity: elicitation_identity.clone(),
                 })
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
@@ -315,19 +319,48 @@ impl PendingAppServerRequests {
             });
         }
 
-        if let Some(key) = self
-            .mcp_requests
-            .iter()
-            .find_map(|(key, value)| (value == request_id).then(|| key.clone()))
-        {
-            self.mcp_requests.remove(&key);
+        if let Some(key) = self.mcp_request_keys_by_wire_id.get(request_id).cloned() {
+            self.take_mcp_request(&key);
             return Some(ResolvedAppServerRequest::McpElicitation {
                 server_name: key.server_name,
-                request_id: key.request_id,
+                elicitation_identity: key.elicitation_identity,
             });
         }
 
         None
+    }
+
+    fn retain_mcp_wire_alias(&mut self, key: McpRequestKey, request_id: AppServerRequestId) {
+        self.mcp_requests.insert(key.clone(), request_id.clone());
+        let aliases = self
+            .mcp_wire_ids_by_request_key
+            .entry(key.clone())
+            .or_default();
+        if let Some(index) = aliases.iter().position(|alias| alias == &request_id) {
+            aliases.remove(index);
+        }
+        aliases.push_back(request_id.clone());
+        self.mcp_request_keys_by_wire_id
+            .insert(request_id, key.clone());
+        while aliases.len() > MAX_WIRE_ALIASES_PER_INTERACTION {
+            if let Some(pruned) = aliases.pop_front()
+                && self.mcp_request_keys_by_wire_id.get(&pruned) == Some(&key)
+            {
+                self.mcp_request_keys_by_wire_id.remove(&pruned);
+            }
+        }
+    }
+
+    fn take_mcp_request(&mut self, key: &McpRequestKey) -> Option<AppServerRequestId> {
+        let current = self.mcp_requests.remove(key);
+        if let Some(aliases) = self.mcp_wire_ids_by_request_key.remove(key) {
+            for alias in aliases {
+                if self.mcp_request_keys_by_wire_id.get(&alias) == Some(key) {
+                    self.mcp_request_keys_by_wire_id.remove(&alias);
+                }
+            }
+        }
+        current
     }
 
     pub(super) fn contains_server_request(&self, request: &ServerRequest) -> bool {
@@ -351,10 +384,12 @@ impl PendingAppServerRequests {
                         .any(|pending| &pending.request_id == request_id)
                 })
             }
-            ServerRequest::McpServerElicitationRequest { request_id, .. } => self
-                .mcp_requests
-                .values()
-                .any(|pending_request_id| pending_request_id == request_id),
+            ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                self.mcp_requests.get(&McpRequestKey {
+                    server_name: params.server_name.clone(),
+                    elicitation_identity: params.elicitation_identity.clone(),
+                }) == Some(request_id)
+            }
             ServerRequest::DynamicToolCall { .. }
             | ServerRequest::ChatgptAuthTokensRefresh { .. }
             | ServerRequest::AttestationGenerate { .. }
@@ -410,11 +445,12 @@ struct PendingUserInputRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct McpRequestKey {
     server_name: String,
-    request_id: AppServerRequestId,
+    elicitation_identity: McpElicitationIdentity,
 }
 
 #[cfg(test)]
 mod tests {
+    use super::MAX_WIRE_ALIASES_PER_INTERACTION;
     use super::PendingAppServerRequests;
     use super::ResolvedAppServerRequest;
     use super::UnsupportedAppServerRequest;
@@ -679,6 +715,10 @@ mod tests {
                 params: McpServerElicitationRequestParams {
                     thread_id: "thread-1".to_string(),
                     turn_id: Some("turn-1".to_string()),
+                    elicitation_identity: codex_protocol::mcp::RequestId::String(
+                        "elicitation-1".to_string(),
+                    )
+                    .into(),
                     server_name: "example".to_string(),
                     request: McpServerElicitationRequest::Form {
                         meta: None,
@@ -698,7 +738,9 @@ mod tests {
         let resolution = pending
             .take_resolution(&Op::ResolveElicitation {
                 server_name: "example".to_string(),
-                request_id: AppServerRequestId::Integer(12),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-1".to_string(),
+                ),
                 decision: McpServerElicitationAction::Accept,
                 content: Some(json!({ "answer": "yes" })),
                 meta: Some(json!({ "source": "tui" })),
@@ -715,6 +757,161 @@ mod tests {
                 "_meta": { "source": "tui" }
             })
         );
+    }
+
+    #[test]
+    fn mcp_elicitation_rebinds_latest_wire_id_without_merging_distinct_identities() {
+        let params = McpServerElicitationRequestParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                "elicitation-1".to_string(),
+            ),
+            server_name: "example".to_string(),
+            request: McpServerElicitationRequest::Form {
+                meta: None,
+                message: "Same prompt".to_string(),
+                requested_schema: McpElicitationSchema {
+                    schema_uri: None,
+                    type_: McpElicitationObjectType::Object,
+                    properties: BTreeMap::new(),
+                    required: None,
+                },
+            },
+        };
+        let mut pending = PendingAppServerRequests::default();
+        for request_id in [12, 13] {
+            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: params.clone(),
+            });
+        }
+        let mut distinct_params = params.clone();
+        distinct_params.elicitation_identity =
+            codex_app_server_protocol::McpElicitationIdentity::String("elicitation-2".to_string());
+        pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
+            request_id: AppServerRequestId::Integer(14),
+            params: distinct_params,
+        });
+
+        let rebound = pending
+            .take_resolution(&Op::ResolveElicitation {
+                server_name: "example".to_string(),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-1".to_string(),
+                ),
+                decision: McpServerElicitationAction::Accept,
+                content: None,
+                meta: None,
+            })
+            .expect("response should serialize")
+            .expect("stable elicitation should remain pending");
+        assert_eq!(rebound.request_id, AppServerRequestId::Integer(13));
+
+        let distinct = pending
+            .take_resolution(&Op::ResolveElicitation {
+                server_name: "example".to_string(),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-2".to_string(),
+                ),
+                decision: McpServerElicitationAction::Decline,
+                content: None,
+                meta: None,
+            })
+            .expect("response should serialize")
+            .expect("distinct elicitation should remain pending");
+        assert_eq!(distinct.request_id, AppServerRequestId::Integer(14));
+
+        let mut pending = PendingAppServerRequests::default();
+        for request_id in [12, 13] {
+            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: params.clone(),
+            });
+        }
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(12)),
+            Some(ResolvedAppServerRequest::McpElicitation {
+                server_name: "example".to_string(),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-1".to_string(),
+                ),
+            })
+        );
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(13)),
+            None
+        );
+    }
+
+    #[test]
+    fn mcp_elicitation_bounds_wire_aliases_and_keeps_latest_response_target() {
+        let params = McpServerElicitationRequestParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                "elicitation-1".to_string(),
+            ),
+            server_name: "example".to_string(),
+            request: McpServerElicitationRequest::Form {
+                meta: None,
+                message: "Same prompt".to_string(),
+                requested_schema: McpElicitationSchema {
+                    schema_uri: None,
+                    type_: McpElicitationObjectType::Object,
+                    properties: BTreeMap::new(),
+                    required: None,
+                },
+            },
+        };
+        let mut pending = PendingAppServerRequests::default();
+        for request_id in 0..100 {
+            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: params.clone(),
+            });
+        }
+
+        assert_eq!(pending.mcp_requests.len(), 1);
+        assert_eq!(
+            pending.mcp_request_keys_by_wire_id.len(),
+            MAX_WIRE_ALIASES_PER_INTERACTION
+        );
+        assert_eq!(
+            pending.resolve_notification(&AppServerRequestId::Integer(0)),
+            None,
+            "an ACK for a pruned alias must be inert"
+        );
+        assert_eq!(pending.mcp_requests.len(), 1);
+
+        let resolution = pending
+            .take_resolution(&Op::ResolveElicitation {
+                server_name: "example".to_string(),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-1".to_string(),
+                ),
+                decision: McpServerElicitationAction::Accept,
+                content: None,
+                meta: None,
+            })
+            .expect("response should serialize")
+            .expect("stable elicitation should remain pending");
+        assert_eq!(resolution.request_id, AppServerRequestId::Integer(99));
+        assert!(pending.mcp_request_keys_by_wire_id.is_empty());
+
+        for request_id in 0..100 {
+            pending.note_server_request(&ServerRequest::McpServerElicitationRequest {
+                request_id: AppServerRequestId::Integer(request_id),
+                params: params.clone(),
+            });
+        }
+        assert!(
+            pending
+                .resolve_notification(&AppServerRequestId::Integer(98))
+                .is_some()
+        );
+        assert!(pending.mcp_requests.is_empty());
+        assert!(pending.mcp_request_keys_by_wire_id.is_empty());
     }
 
     #[test]
@@ -835,6 +1032,10 @@ mod tests {
                 params: McpServerElicitationRequestParams {
                     thread_id: "thread-1".to_string(),
                     turn_id: Some("turn-1".to_string()),
+                    elicitation_identity: codex_protocol::mcp::RequestId::String(
+                        "elicitation-1".to_string(),
+                    )
+                    .into(),
                     server_name: "example".to_string(),
                     request: McpServerElicitationRequest::Form {
                         meta: None,
@@ -855,7 +1056,9 @@ mod tests {
             pending.resolve_notification(&AppServerRequestId::Integer(12)),
             Some(ResolvedAppServerRequest::McpElicitation {
                 server_name: "example".to_string(),
-                request_id: AppServerRequestId::Integer(12),
+                elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-1".to_string(),
+                ),
             })
         );
     }

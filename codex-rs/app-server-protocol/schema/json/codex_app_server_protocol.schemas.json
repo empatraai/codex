@@ -3260,6 +3260,17 @@
         }
       ]
     },
+    "McpElicitationIdentity": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "format": "int64",
+          "type": "integer"
+        }
+      ]
+    },
     "McpElicitationLegacyTitledEnumSchema": {
       "additionalProperties": false,
       "properties": {
@@ -3804,6 +3815,14 @@
         }
       ],
       "properties": {
+        "elicitationIdentity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/McpElicitationIdentity"
+            }
+          ],
+          "description": "Stable identity assigned by the originating MCP server.\n\nUnlike the enclosing app-server JSON-RPC request id, this value remains unchanged when app-server reissues the same elicitation request to a connected client."
+        },
         "serverName": {
           "type": "string"
         },
@@ -3819,6 +3838,7 @@
         }
       },
       "required": [
+        "elicitationIdentity",
         "serverName",
         "threadId"
       ],
@@ -9162,6 +9182,85 @@
             "type": "object"
           }
         ]
+      },
+      "EmpatraInitialTurnParams": {
+        "description": "The bounded initial-turn surface used by Empatra's atomic thread creation RPCs.",
+        "properties": {
+          "approvalPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/AskForApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "clientUserMessageId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "collaborationMode": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/CollaborationMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "input": {
+            "items": {
+              "$ref": "#/definitions/v2/UserInput"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permissions": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sandboxPolicy": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/SandboxPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "type": "object"
       },
       "ErrorNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",

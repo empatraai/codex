@@ -261,6 +261,10 @@ async fn invalid_url_elicitation_is_declined() {
         codex_app_server_protocol::McpServerElicitationRequestParams {
             thread_id: request_thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
+            elicitation_identity: codex_protocol::mcp::RequestId::String(
+                "elicitation-auth".to_string(),
+            )
+            .into(),
             server_name: "payments".to_string(),
             request: codex_app_server_protocol::McpServerElicitationRequest::Url {
                 meta: None,
@@ -277,12 +281,17 @@ async fn invalid_url_elicitation_is_declined() {
             thread_id: op_thread_id,
             op: Op::ResolveElicitation {
                 server_name,
-                request_id: codex_app_server_protocol::RequestId::Integer(9),
+                elicitation_identity,
                 decision: codex_app_server_protocol::McpServerElicitationAction::Decline,
                 content: None,
                 meta: None,
             },
-        }) if op_thread_id == request_thread_id && server_name == "payments"
+        }) if op_thread_id == request_thread_id
+            && server_name == "payments"
+            && elicitation_identity
+                == codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-auth".to_string(),
+                )
     );
 }
 

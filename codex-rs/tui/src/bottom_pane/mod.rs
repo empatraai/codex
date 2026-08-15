@@ -1483,7 +1483,7 @@ impl BottomPane {
                     elicitation_target: Some(AppLinkElicitationTarget {
                         thread_id: request.thread_id(),
                         server_name: request.server_name().to_string(),
-                        request_id: request.request_id().clone(),
+                        elicitation_identity: request.elicitation_identity().clone(),
                     }),
                 },
                 self.app_event_tx.clone(),

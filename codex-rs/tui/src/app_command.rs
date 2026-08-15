@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::FileChangeApprovalDecision;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::McpServerElicitationAction;
-use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_app_server_protocol::UserInput;
@@ -70,7 +70,7 @@ pub(crate) enum AppCommand {
     },
     ResolveElicitation {
         server_name: String,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         decision: McpServerElicitationAction,
         content: Option<Value>,
         meta: Option<Value>,
@@ -210,14 +210,14 @@ impl AppCommand {
 
     pub(crate) fn resolve_elicitation(
         server_name: String,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         decision: McpServerElicitationAction,
         content: Option<Value>,
         meta: Option<Value>,
     ) -> Self {
         Self::ResolveElicitation {
             server_name,
-            request_id,
+            elicitation_identity,
             decision,
             content,
             meta,

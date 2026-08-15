@@ -1301,7 +1301,7 @@ fn insert_definition(
     location: &str,
 ) -> Result<()> {
     if let Some(existing) = definitions.get(&name) {
-        if existing == &schema {
+        if schemas_are_equivalent_definitions(&name, existing, &schema) {
             return Ok(());
         }
 
@@ -1320,6 +1320,22 @@ fn insert_definition(
 
     definitions.insert(name, schema);
     Ok(())
+}
+
+fn schemas_are_equivalent_definitions(name: &str, left: &Value, right: &Value) -> bool {
+    fn normalized(name: &str, schema: &Value) -> Value {
+        let mut schema = schema.clone();
+        let Value::Object(object) = &mut schema else {
+            return schema;
+        };
+        object.remove("$schema");
+        if object.get("title").and_then(Value::as_str) == Some(name) {
+            object.remove("title");
+        }
+        schema
+    }
+
+    normalized(name, left) == normalized(name, right)
 }
 
 fn write_json_schema_with_return<T>(out_dir: &Path, name: &str) -> Result<GeneratedSchema>
@@ -2111,6 +2127,62 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
     use uuid::Uuid;
+
+    #[test]
+    fn schema_definition_dedup_ignores_root_only_metadata() -> Result<()> {
+        let mut definitions = Map::new();
+        insert_definition(
+            &mut definitions,
+            "ThreadStartParams".to_string(),
+            serde_json::json!({
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "title": "ThreadStartParams",
+                "type": "object",
+                "properties": { "cwd": { "type": ["string", "null"] } },
+            }),
+            "test namespace",
+        )?;
+        insert_definition(
+            &mut definitions,
+            "ThreadStartParams".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "cwd": { "type": ["string", "null"] } },
+            }),
+            "test namespace",
+        )?;
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(
+            definitions["ThreadStartParams"]["title"],
+            "ThreadStartParams"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_definition_dedup_rejects_structural_collisions() {
+        let mut definitions = Map::new();
+        insert_definition(
+            &mut definitions,
+            "ThreadStartParams".to_string(),
+            serde_json::json!({ "type": "object", "properties": {} }),
+            "test namespace",
+        )
+        .expect("first definition should insert");
+
+        let error = insert_definition(
+            &mut definitions,
+            "ThreadStartParams".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": { "cwd": { "type": "string" } },
+            }),
+            "test namespace",
+        )
+        .expect_err("different definitions must still fail closed");
+        assert!(error.to_string().contains("schema definition collision"));
+    }
 
     #[test]
     fn generated_ts_optional_nullable_fields_only_in_params() -> Result<()> {

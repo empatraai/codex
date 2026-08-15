@@ -5,12 +5,12 @@ use std::path::PathBuf;
 #[cfg(test)]
 use crate::app_command::AppCommand as Op;
 use codex_app_server_protocol::McpElicitationEnumSchema;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::McpElicitationPrimitiveSchema;
 use codex_app_server_protocol::McpElicitationSingleSelectEnumSchema;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequest;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
-use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_KEY as APPROVAL_META_KIND_KEY;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_MCP_TOOL_CALL as APPROVAL_META_KIND_MCP_TOOL_CALL;
@@ -166,7 +166,7 @@ struct McpToolApprovalDisplayParam {
 pub(crate) struct McpServerElicitationFormRequest {
     thread_id: ThreadId,
     server_name: String,
-    request_id: AppServerRequestId,
+    elicitation_identity: McpElicitationIdentity,
     message: String,
     approval_display_params: Vec<McpToolApprovalDisplayParam>,
     response_mode: McpServerElicitationResponseMode,
@@ -204,13 +204,18 @@ impl FooterTip {
 }
 
 impl McpServerElicitationFormRequest {
+    fn has_same_identity(&self, other: &Self) -> bool {
+        self.server_name == other.server_name
+            && self.elicitation_identity == other.elicitation_identity
+    }
+
     pub(crate) fn from_app_server_request(
         thread_id: ThreadId,
-        request_id: AppServerRequestId,
         request: McpServerElicitationRequestParams,
     ) -> Option<Self> {
         let McpServerElicitationRequestParams {
             server_name,
+            elicitation_identity,
             request,
             ..
         } = request;
@@ -227,7 +232,7 @@ impl McpServerElicitationFormRequest {
         Self::from_parts(
             thread_id,
             server_name,
-            request_id,
+            elicitation_identity,
             meta,
             message,
             requested_schema,
@@ -237,7 +242,7 @@ impl McpServerElicitationFormRequest {
     fn from_parts(
         thread_id: ThreadId,
         server_name: String,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         meta: Option<Value>,
         message: String,
         requested_schema: Value,
@@ -344,7 +349,7 @@ impl McpServerElicitationFormRequest {
         Some(Self {
             thread_id,
             server_name,
-            request_id,
+            elicitation_identity,
             message,
             approval_display_params,
             response_mode,
@@ -365,8 +370,8 @@ impl McpServerElicitationFormRequest {
         self.server_name.as_str()
     }
 
-    pub(crate) fn request_id(&self) -> &AppServerRequestId {
-        &self.request_id
+    pub(crate) fn elicitation_identity(&self) -> &McpElicitationIdentity {
+        &self.elicitation_identity
     }
 }
 
@@ -1137,7 +1142,7 @@ impl McpServerElicitationOverlay {
         self.app_event_tx.resolve_elicitation(
             self.request.thread_id,
             self.request.server_name.clone(),
-            self.request.request_id.clone(),
+            self.request.elicitation_identity.clone(),
             McpServerElicitationAction::Cancel,
             /*content*/ None,
             /*meta*/ None,
@@ -1185,7 +1190,7 @@ impl McpServerElicitationOverlay {
             self.app_event_tx.resolve_elicitation(
                 self.request.thread_id,
                 self.request.server_name.clone(),
-                self.request.request_id.clone(),
+                self.request.elicitation_identity.clone(),
                 decision,
                 /*content*/ None,
                 meta,
@@ -1203,7 +1208,7 @@ impl McpServerElicitationOverlay {
         self.app_event_tx.resolve_elicitation(
             self.request.thread_id,
             self.request.server_name.clone(),
-            self.request.request_id.clone(),
+            self.request.elicitation_identity.clone(),
             McpServerElicitationAction::Accept,
             Some(Value::Object(content)),
             /*meta*/ None,
@@ -1214,7 +1219,7 @@ impl McpServerElicitationOverlay {
     fn dismiss_resolved_request(&mut self, request: &ResolvedAppServerRequest) -> bool {
         let ResolvedAppServerRequest::McpElicitation {
             server_name,
-            request_id,
+            elicitation_identity,
         } = request
         else {
             return false;
@@ -1222,9 +1227,12 @@ impl McpServerElicitationOverlay {
 
         let queue_len = self.queue.len();
         self.queue.retain(|queued_request| {
-            queued_request.server_name != *server_name || queued_request.request_id != *request_id
+            queued_request.server_name != *server_name
+                || queued_request.elicitation_identity != *elicitation_identity
         });
-        if self.request.server_name == *server_name && self.request.request_id == *request_id {
+        if self.request.server_name == *server_name
+            && self.request.elicitation_identity == *elicitation_identity
+        {
             self.advance_queue_or_complete();
             return true;
         }
@@ -1684,6 +1692,17 @@ impl BottomPaneView for McpServerElicitationOverlay {
         &mut self,
         request: McpServerElicitationFormRequest,
     ) -> Option<McpServerElicitationFormRequest> {
+        if self.request.has_same_identity(&request) {
+            return None;
+        }
+        if let Some(queued) = self
+            .queue
+            .iter_mut()
+            .find(|queued| queued.has_same_identity(&request))
+        {
+            *queued = request;
+            return None;
+        }
         self.queue.push_back(request);
         None
     }
@@ -1753,9 +1772,20 @@ mod tests {
         requested_schema: Value,
         meta: Option<Value>,
     ) -> McpServerElicitationRequestParams {
+        form_request_with_identity(message, requested_schema, meta, "elicitation-1")
+    }
+
+    fn form_request_with_identity(
+        message: &str,
+        requested_schema: Value,
+        meta: Option<Value>,
+        identity: &str,
+    ) -> McpServerElicitationRequestParams {
         McpServerElicitationRequestParams {
             thread_id: "thread-1".to_string(),
             turn_id: Some("turn-1".to_string()),
+            elicitation_identity: codex_protocol::mcp::RequestId::String(identity.to_string())
+                .into(),
             server_name: "server-1".to_string(),
             request: McpServerElicitationRequest::Form {
                 meta,
@@ -1766,19 +1796,15 @@ mod tests {
         }
     }
 
-    fn request_id(value: &str) -> AppServerRequestId {
-        AppServerRequestId::String(value.to_string())
+    fn elicitation_identity(value: &str) -> McpElicitationIdentity {
+        McpElicitationIdentity::String(value.to_string())
     }
 
     fn from_form_request(
         thread_id: ThreadId,
         request: McpServerElicitationRequestParams,
     ) -> Option<McpServerElicitationFormRequest> {
-        McpServerElicitationFormRequest::from_app_server_request(
-            thread_id,
-            request_id("request-1"),
-            request,
-        )
+        McpServerElicitationFormRequest::from_app_server_request(thread_id, request)
     }
 
     fn empty_object_schema() -> Value {
@@ -1877,7 +1903,7 @@ mod tests {
             McpServerElicitationFormRequest {
                 thread_id,
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 message: "Allow this request?".to_string(),
                 approval_display_params: Vec::new(),
                 response_mode: McpServerElicitationResponseMode::FormContent,
@@ -1947,7 +1973,7 @@ mod tests {
             McpServerElicitationFormRequest {
                 thread_id,
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 message: "Allow this request?".to_string(),
                 approval_display_params: Vec::new(),
                 response_mode: McpServerElicitationResponseMode::ApprovalAction,
@@ -2004,7 +2030,7 @@ mod tests {
             McpServerElicitationFormRequest {
                 thread_id,
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 message: "Allow this request?".to_string(),
                 approval_display_params: Vec::new(),
                 response_mode: McpServerElicitationResponseMode::ApprovalAction,
@@ -2190,7 +2216,7 @@ mod tests {
             op,
             Op::ResolveElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 decision: McpServerElicitationAction::Accept,
                 content: Some(serde_json::json!({
                     "confirmed": true,
@@ -2281,7 +2307,7 @@ mod tests {
             op,
             Op::ResolveElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 decision: McpServerElicitationAction::Accept,
                 content: None,
                 meta: Some(serde_json::json!({
@@ -2335,7 +2361,7 @@ mod tests {
             op,
             Op::ResolveElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 decision: McpServerElicitationAction::Accept,
                 content: None,
                 meta: Some(serde_json::json!({
@@ -2388,7 +2414,7 @@ mod tests {
             op,
             Op::ResolveElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
                 decision: McpServerElicitationAction::Cancel,
                 content: None,
                 meta: None,
@@ -2418,7 +2444,7 @@ mod tests {
         .expect("expected supported form");
         let second = from_form_request(
             ThreadId::default(),
-            form_request(
+            form_request_with_identity(
                 "Second",
                 serde_json::json!({
                     "type": "object",
@@ -2430,12 +2456,13 @@ mod tests {
                     },
                 }),
                 /*meta*/ None,
+                "elicitation-2",
             ),
         )
         .expect("expected supported form");
         let third = from_form_request(
             ThreadId::default(),
-            form_request(
+            form_request_with_identity(
                 "Third",
                 serde_json::json!({
                     "type": "object",
@@ -2447,6 +2474,7 @@ mod tests {
                     },
                 }),
                 /*meta*/ None,
+                "elicitation-3",
             ),
         )
         .expect("expected supported form");
@@ -2466,6 +2494,48 @@ mod tests {
         overlay.submit_answers();
 
         assert_eq!(overlay.request.message, "Third");
+    }
+
+    #[test]
+    fn reissued_identity_does_not_queue_a_duplicate_prompt() {
+        let (tx, _rx) = test_sender();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "confirmed": { "type": "boolean", "title": "Confirm" }
+            }
+        });
+        let first = from_form_request(
+            ThreadId::default(),
+            form_request_with_identity("Same prompt", schema.clone(), None, "elicitation-1"),
+        )
+        .expect("expected supported form");
+        let replay = from_form_request(
+            ThreadId::default(),
+            form_request_with_identity("Same prompt", schema.clone(), None, "elicitation-1"),
+        )
+        .expect("expected supported form");
+        let distinct = from_form_request(
+            ThreadId::default(),
+            form_request_with_identity("Same prompt", schema, None, "elicitation-2"),
+        )
+        .expect("expected supported form");
+        let mut overlay = McpServerElicitationOverlay::new(
+            first, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+
+        overlay.try_consume_mcp_server_elicitation_request(replay);
+        overlay.try_consume_mcp_server_elicitation_request(distinct);
+
+        assert_eq!(overlay.queue.len(), 1);
+        assert_eq!(
+            overlay
+                .queue
+                .front()
+                .map(|request| &request.elicitation_identity),
+            Some(&McpElicitationIdentity::String("elicitation-2".to_string()))
+        );
     }
 
     #[test]
@@ -2495,10 +2565,13 @@ mod tests {
         overlay.try_consume_mcp_server_elicitation_request(
             McpServerElicitationFormRequest::from_app_server_request(
                 thread_id,
-                request_id("request-2"),
                 McpServerElicitationRequestParams {
                     thread_id: "thread-1".to_string(),
                     turn_id: Some("turn-2".to_string()),
+                    elicitation_identity: codex_protocol::mcp::RequestId::String(
+                        "elicitation-2".to_string(),
+                    )
+                    .into(),
                     server_name: "server-1".to_string(),
                     request: McpServerElicitationRequest::Form {
                         meta: None,
@@ -2514,7 +2587,7 @@ mod tests {
         assert!(
             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-1"),
+                elicitation_identity: elicitation_identity("elicitation-1"),
             })
         );
         assert_eq!(overlay.request.message, "Second");
@@ -2526,7 +2599,7 @@ mod tests {
         assert!(
             overlay.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
                 server_name: "server-1".to_string(),
-                request_id: request_id("request-2"),
+                elicitation_identity: elicitation_identity("elicitation-2"),
             })
         );
         assert!(overlay.is_complete());

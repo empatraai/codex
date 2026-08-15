@@ -1,22 +1,26 @@
 use crate::app_command::AppCommand;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
+
+const MAX_WIRE_ALIASES_PER_INTERACTION: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ElicitationRequestKey {
     server_name: String,
-    request_id: AppServerRequestId,
+    elicitation_identity: McpElicitationIdentity,
 }
 
 impl ElicitationRequestKey {
-    fn new(server_name: String, request_id: AppServerRequestId) -> Self {
+    fn new(server_name: String, elicitation_identity: McpElicitationIdentity) -> Self {
         Self {
             server_name,
-            request_id,
+            elicitation_identity,
         }
     }
 }
@@ -40,7 +44,9 @@ pub(super) struct PendingInteractiveReplayState {
     exec_approval_call_ids_by_turn_id: HashMap<String, Vec<String>>,
     patch_approval_call_ids: HashSet<String>,
     patch_approval_call_ids_by_turn_id: HashMap<String, Vec<String>>,
-    elicitation_requests: HashSet<ElicitationRequestKey>,
+    elicitation_requests: HashMap<ElicitationRequestKey, AppServerRequestId>,
+    elicitation_wire_ids_by_request_key:
+        HashMap<ElicitationRequestKey, VecDeque<AppServerRequestId>>,
     request_permissions_call_ids: HashSet<String>,
     request_permissions_call_ids_by_turn_id: HashMap<String, Vec<String>>,
     request_user_input_call_ids: HashSet<String>,
@@ -115,19 +121,13 @@ impl PendingInteractiveReplayState {
             }
             AppCommand::ResolveElicitation {
                 server_name,
-                request_id,
+                elicitation_identity,
                 ..
             } => {
-                self.elicitation_requests
-                    .remove(&ElicitationRequestKey::new(
-                        server_name.to_string(),
-                        request_id.clone(),
-                    ));
-                self.pending_requests_by_request_id.retain(
-                    |_, pending| {
-                        !matches!(pending, PendingInteractiveRequest::Elicitation(key) if key.server_name == *server_name && key.request_id == *request_id)
-                    },
-                );
+                self.remove_elicitation_request(&ElicitationRequestKey::new(
+                    server_name.to_string(),
+                    elicitation_identity.clone(),
+                ));
             }
             AppCommand::RequestPermissionsResponse { id, .. } => {
                 self.request_permissions_call_ids.remove(id);
@@ -207,13 +207,11 @@ impl PendingInteractiveReplayState {
                 );
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
-                let key =
-                    ElicitationRequestKey::new(params.server_name.clone(), request_id.clone());
-                self.elicitation_requests.insert(key.clone());
-                self.pending_requests_by_request_id.insert(
-                    request_id.clone(),
-                    PendingInteractiveRequest::Elicitation(key),
+                let key = ElicitationRequestKey::new(
+                    params.server_name.clone(),
+                    params.elicitation_identity.clone(),
                 );
+                self.retain_elicitation_wire_alias(key, request_id.clone());
             }
             ServerRequest::ToolRequestUserInput { request_id, params } => {
                 self.request_user_input_call_ids
@@ -305,11 +303,15 @@ impl PendingInteractiveReplayState {
                 );
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
-                self.elicitation_requests
-                    .remove(&ElicitationRequestKey::new(
-                        params.server_name.clone(),
-                        request_id.clone(),
-                    ));
+                let key = ElicitationRequestKey::new(
+                    params.server_name.clone(),
+                    params.elicitation_identity.clone(),
+                );
+                if self.elicitation_requests.get(&key) == Some(request_id) {
+                    self.remove_elicitation_request(&key);
+                } else {
+                    self.forget_elicitation_wire_alias(&key, request_id);
+                }
             }
             ServerRequest::ToolRequestUserInput { params, .. } => {
                 self.request_user_input_call_ids.remove(&params.item_id);
@@ -347,8 +349,10 @@ impl PendingInteractiveReplayState {
             }
             _ => {}
         }
-        self.pending_requests_by_request_id
-            .retain(|_, pending| !Self::request_matches_server_request(pending, request));
+        if !matches!(request, ServerRequest::McpServerElicitationRequest { .. }) {
+            self.pending_requests_by_request_id
+                .retain(|_, pending| !Self::request_matches_server_request(pending, request));
+        }
     }
 
     pub(super) fn should_replay_snapshot_request(&self, request: &ServerRequest) -> bool {
@@ -359,12 +363,12 @@ impl PendingInteractiveReplayState {
             ServerRequest::FileChangeRequestApproval { params, .. } => {
                 self.patch_approval_call_ids.contains(&params.item_id)
             }
-            ServerRequest::McpServerElicitationRequest { request_id, params } => self
-                .elicitation_requests
-                .contains(&ElicitationRequestKey::new(
+            ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                self.elicitation_requests.get(&ElicitationRequestKey::new(
                     params.server_name.clone(),
-                    request_id.clone(),
-                )),
+                    params.elicitation_identity.clone(),
+                )) == Some(request_id)
+            }
             ServerRequest::ToolRequestUserInput { params, .. } => {
                 self.request_user_input_call_ids.contains(&params.item_id)
             }
@@ -471,6 +475,7 @@ impl PendingInteractiveReplayState {
         self.patch_approval_call_ids.clear();
         self.patch_approval_call_ids_by_turn_id.clear();
         self.elicitation_requests.clear();
+        self.elicitation_wire_ids_by_request_key.clear();
         self.request_permissions_call_ids.clear();
         self.request_permissions_call_ids_by_turn_id.clear();
         self.request_user_input_call_ids.clear();
@@ -503,7 +508,7 @@ impl PendingInteractiveReplayState {
                 );
             }
             PendingInteractiveRequest::Elicitation(key) => {
-                self.elicitation_requests.remove(&key);
+                self.remove_elicitation_request(&key);
             }
             PendingInteractiveRequest::RequestPermissions { turn_id, item_id } => {
                 self.request_permissions_call_ids.remove(&item_id);
@@ -520,6 +525,70 @@ impl PendingInteractiveReplayState {
                     &turn_id,
                     &item_id,
                 );
+            }
+        }
+    }
+
+    fn retain_elicitation_wire_alias(
+        &mut self,
+        key: ElicitationRequestKey,
+        request_id: AppServerRequestId,
+    ) {
+        self.elicitation_requests
+            .insert(key.clone(), request_id.clone());
+        let aliases = self
+            .elicitation_wire_ids_by_request_key
+            .entry(key.clone())
+            .or_default();
+        if let Some(index) = aliases.iter().position(|alias| alias == &request_id) {
+            aliases.remove(index);
+        }
+        aliases.push_back(request_id.clone());
+        self.pending_requests_by_request_id.insert(
+            request_id,
+            PendingInteractiveRequest::Elicitation(key.clone()),
+        );
+        while aliases.len() > MAX_WIRE_ALIASES_PER_INTERACTION {
+            if let Some(pruned) = aliases.pop_front()
+                && matches!(
+                    self.pending_requests_by_request_id.get(&pruned),
+                    Some(PendingInteractiveRequest::Elicitation(alias_key)) if alias_key == &key
+                )
+            {
+                self.pending_requests_by_request_id.remove(&pruned);
+            }
+        }
+    }
+
+    fn forget_elicitation_wire_alias(
+        &mut self,
+        key: &ElicitationRequestKey,
+        request_id: &AppServerRequestId,
+    ) {
+        if let Some(aliases) = self.elicitation_wire_ids_by_request_key.get_mut(key) {
+            aliases.retain(|alias| alias != request_id);
+            if aliases.is_empty() {
+                self.elicitation_wire_ids_by_request_key.remove(key);
+            }
+        }
+        if matches!(
+            self.pending_requests_by_request_id.get(request_id),
+            Some(PendingInteractiveRequest::Elicitation(alias_key)) if alias_key == key
+        ) {
+            self.pending_requests_by_request_id.remove(request_id);
+        }
+    }
+
+    fn remove_elicitation_request(&mut self, key: &ElicitationRequestKey) {
+        self.elicitation_requests.remove(key);
+        if let Some(aliases) = self.elicitation_wire_ids_by_request_key.remove(key) {
+            for alias in aliases {
+                if matches!(
+                    self.pending_requests_by_request_id.get(&alias),
+                    Some(PendingInteractiveRequest::Elicitation(alias_key)) if alias_key == key
+                ) {
+                    self.pending_requests_by_request_id.remove(&alias);
+                }
             }
         }
     }
@@ -545,8 +614,11 @@ impl PendingInteractiveReplayState {
             ) => turn_id == &params.turn_id && item_id == &params.item_id,
             (
                 PendingInteractiveRequest::Elicitation(key),
-                ServerRequest::McpServerElicitationRequest { request_id, params },
-            ) => key.server_name == params.server_name && key.request_id == *request_id,
+                ServerRequest::McpServerElicitationRequest { params, .. },
+            ) => {
+                key.server_name == params.server_name
+                    && key.elicitation_identity == params.elicitation_identity
+            }
             (
                 PendingInteractiveRequest::RequestPermissions { turn_id, item_id },
                 ServerRequest::PermissionsRequestApproval { params, .. },
@@ -564,6 +636,10 @@ impl PendingInteractiveReplayState {
 mod tests {
     use super::super::ThreadBufferedEvent;
     use super::super::ThreadEventStore;
+    use super::ElicitationRequestKey;
+    use super::MAX_WIRE_ALIASES_PER_INTERACTION;
+    use super::PendingInteractiveReplayState;
+    use super::PendingInteractiveRequest;
     use crate::app_command::AppCommand as Op;
     use codex_app_server_protocol::CommandExecutionApprovalDecision;
     use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
@@ -643,12 +719,21 @@ mod tests {
         }
     }
 
-    fn elicitation_request(server_name: &str, request_id: &str, turn_id: &str) -> ServerRequest {
+    fn elicitation_request(
+        server_name: &str,
+        request_id: &str,
+        elicitation_identity: &str,
+        turn_id: &str,
+    ) -> ServerRequest {
         ServerRequest::McpServerElicitationRequest {
             request_id: AppServerRequestId::String(request_id.to_string()),
             params: McpServerElicitationRequestParams {
                 thread_id: "thread-1".to_string(),
                 turn_id: Some(turn_id.to_string()),
+                elicitation_identity: codex_protocol::mcp::RequestId::String(
+                    elicitation_identity.to_string(),
+                )
+                .into(),
                 server_name: server_name.to_string(),
                 request: McpServerElicitationRequest::Form {
                     meta: None,
@@ -880,12 +965,18 @@ mod tests {
     #[test]
     fn thread_event_snapshot_drops_resolved_elicitation_after_outbound_resolution() {
         let mut store = ThreadEventStore::new(/*capacity*/ 8);
-        let request_id = AppServerRequestId::String("request-1".to_string());
-        store.push_request(elicitation_request("server-1", "request-1", "turn-1"));
+        store.push_request(elicitation_request(
+            "server-1",
+            "request-1",
+            "elicitation-1",
+            "turn-1",
+        ));
 
         store.note_outbound_op(&Op::ResolveElicitation {
             server_name: "server-1".to_string(),
-            request_id,
+            elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                "elicitation-1".to_string(),
+            ),
             decision: McpServerElicitationAction::Accept,
             content: None,
             meta: None,
@@ -896,6 +987,122 @@ mod tests {
             snapshot.events.is_empty(),
             "resolved elicitation prompt should not replay on thread switch"
         );
+    }
+
+    #[test]
+    fn thread_event_snapshot_rebinds_mcp_wire_id_by_stable_identity() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(elicitation_request(
+            "server-1",
+            "wire-1",
+            "elicitation-1",
+            "turn-1",
+        ));
+        store.push_request(elicitation_request(
+            "server-1",
+            "wire-2",
+            "elicitation-1",
+            "turn-1",
+        ));
+        store.push_request(elicitation_request(
+            "server-1",
+            "wire-3",
+            "elicitation-2",
+            "turn-1",
+        ));
+
+        let snapshot = store.snapshot();
+        let wire_ids: Vec<AppServerRequestId> = snapshot
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ThreadBufferedEvent::Request(ServerRequest::McpServerElicitationRequest {
+                    request_id,
+                    ..
+                }) => Some(request_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            wire_ids,
+            vec![
+                AppServerRequestId::String("wire-2".to_string()),
+                AppServerRequestId::String("wire-3".to_string()),
+            ]
+        );
+
+        store.push_notification(ServerNotification::ServerRequestResolved(
+            ServerRequestResolvedNotification {
+                request_id: AppServerRequestId::String("wire-1".to_string()),
+                thread_id: "thread-1".to_string(),
+            },
+        ));
+        let snapshot = store.snapshot();
+        assert!(snapshot.events.iter().all(|event| {
+            !matches!(
+                event,
+                ThreadBufferedEvent::Request(ServerRequest::McpServerElicitationRequest {
+                    params,
+                    ..
+                }) if params.elicitation_identity
+                    == codex_app_server_protocol::McpElicitationIdentity::String(
+                        "elicitation-1".to_string(),
+                    )
+            )
+        }));
+    }
+
+    #[test]
+    fn pending_replay_bounds_mcp_wire_aliases_and_accepts_only_retained_acks() {
+        let mut state = PendingInteractiveReplayState::default();
+        for request_id in 0..100 {
+            state.note_server_request(&elicitation_request(
+                "server-1",
+                &format!("wire-{request_id}"),
+                "elicitation-1",
+                "turn-1",
+            ));
+        }
+        let key = ElicitationRequestKey::new(
+            "server-1".to_string(),
+            codex_app_server_protocol::McpElicitationIdentity::String("elicitation-1".to_string()),
+        );
+
+        assert_eq!(state.elicitation_requests.len(), 1);
+        assert_eq!(
+            state.elicitation_wire_ids_by_request_key[&key].len(),
+            MAX_WIRE_ALIASES_PER_INTERACTION
+        );
+        assert_eq!(
+            state.elicitation_requests[&key],
+            AppServerRequestId::String("wire-99".to_string())
+        );
+        assert_eq!(
+            state
+                .pending_requests_by_request_id
+                .values()
+                .filter(|pending| matches!(pending, PendingInteractiveRequest::Elicitation(_)))
+                .count(),
+            MAX_WIRE_ALIASES_PER_INTERACTION
+        );
+
+        state.note_server_notification(&ServerNotification::ServerRequestResolved(
+            ServerRequestResolvedNotification {
+                request_id: AppServerRequestId::String("wire-0".to_string()),
+                thread_id: "thread-1".to_string(),
+            },
+        ));
+        assert!(state.elicitation_requests.contains_key(&key));
+
+        state.note_server_notification(&ServerNotification::ServerRequestResolved(
+            ServerRequestResolvedNotification {
+                request_id: AppServerRequestId::String("wire-98".to_string()),
+                thread_id: "thread-1".to_string(),
+            },
+        ));
+        assert!(!state.elicitation_requests.contains_key(&key));
+        assert!(!state.elicitation_wire_ids_by_request_key.contains_key(&key));
+        assert!(state.pending_requests_by_request_id.is_empty());
     }
 
     #[test]

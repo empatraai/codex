@@ -269,11 +269,18 @@ url = "{mcp_server_url}/mcp"
             .build()
             .map_err(anyhow::Error::msg)?,
     )?)?;
+    let elicitation_identity = params.elicitation_identity.clone();
+    assert!(matches!(
+        &elicitation_identity,
+        codex_app_server_protocol::McpElicitationIdentity::String(value)
+            if value.starts_with("codex-mcp-elicitation-")
+    ));
     assert_eq!(
         params,
         McpServerElicitationRequestParams {
             thread_id: thread.id,
             turn_id: None,
+            elicitation_identity,
             server_name: TEST_SERVER_NAME.to_string(),
             request: McpServerElicitationRequest::Form {
                 meta: None,
@@ -512,11 +519,18 @@ url = "{mcp_server_url}/mcp"
     let ServerRequest::McpServerElicitationRequest { request_id, params } = server_req else {
         panic!("expected McpServerElicitationRequest request, got: {server_req:?}");
     };
+    let elicitation_identity = params.elicitation_identity.clone();
+    assert!(matches!(
+        &elicitation_identity,
+        codex_app_server_protocol::McpElicitationIdentity::String(value)
+            if value.starts_with("codex-mcp-elicitation-")
+    ));
     assert_eq!(
         params,
         McpServerElicitationRequestParams {
             thread_id: thread.id,
             turn_id: None,
+            elicitation_identity,
             server_name: TEST_SERVER_NAME.to_string(),
             request: McpServerElicitationRequest::Url {
                 meta: None,

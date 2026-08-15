@@ -2695,6 +2695,10 @@ async fn inactive_thread_url_elicitation_routes_to_app_link() {
         params: McpServerElicitationRequestParams {
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
+            elicitation_identity: codex_protocol::mcp::RequestId::String(
+                "elicitation-auth".to_string(),
+            )
+            .into(),
             server_name: "payments".to_string(),
             request: McpServerElicitationRequest::Url {
                 meta: None,
@@ -2721,7 +2725,9 @@ async fn inactive_thread_url_elicitation_routes_to_app_link() {
         Some(crate::bottom_pane::AppLinkElicitationTarget {
             thread_id,
             server_name: "payments".to_string(),
-            request_id: AppServerRequestId::Integer(9),
+            elicitation_identity: codex_app_server_protocol::McpElicitationIdentity::String(
+                "elicitation-auth".to_string(),
+            ),
         })
     );
 }
@@ -2735,6 +2741,10 @@ async fn inactive_thread_invalid_url_elicitation_is_declined() {
         params: McpServerElicitationRequestParams {
             thread_id: thread_id.to_string(),
             turn_id: Some("turn-auth".to_string()),
+            elicitation_identity: codex_protocol::mcp::RequestId::String(
+                "elicitation-auth".to_string(),
+            )
+            .into(),
             server_name: "payments".to_string(),
             request: McpServerElicitationRequest::Url {
                 meta: None,
@@ -2757,12 +2767,17 @@ async fn inactive_thread_invalid_url_elicitation_is_declined() {
             thread_id: op_thread_id,
             op: Op::ResolveElicitation {
                 server_name,
-                request_id: AppServerRequestId::Integer(10),
+                elicitation_identity,
                 decision: codex_app_server_protocol::McpServerElicitationAction::Decline,
                 content: None,
                 meta: None,
             },
-        }) if op_thread_id == thread_id && server_name == "payments"
+        }) if op_thread_id == thread_id
+            && server_name == "payments"
+            && elicitation_identity
+                == codex_app_server_protocol::McpElicitationIdentity::String(
+                    "elicitation-auth".to_string(),
+                )
     );
 }
 

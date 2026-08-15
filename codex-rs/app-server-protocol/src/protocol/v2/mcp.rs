@@ -3,6 +3,7 @@ use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
 use codex_protocol::items::McpToolCallError as CoreMcpToolCallError;
 use codex_protocol::mcp::CallToolResult as CoreMcpCallToolResult;
 use codex_protocol::mcp::McpServerInfo;
+use codex_protocol::mcp::RequestId as McpRequestId;
 use codex_protocol::mcp::Resource as McpResource;
 pub use codex_protocol::mcp::ResourceContent as McpResourceContent;
 use codex_protocol::mcp::ResourceTemplate as McpResourceTemplate;
@@ -303,12 +304,35 @@ pub struct McpServerElicitationRequestParams {
     /// context is app-server correlation rather than part of the protocol identity of the
     /// elicitation itself.
     pub turn_id: Option<String>,
+    /// Stable identity assigned by the originating MCP server.
+    ///
+    /// Unlike the enclosing app-server JSON-RPC request id, this value remains unchanged when
+    /// app-server reissues the same elicitation request to a connected client.
+    pub elicitation_identity: McpElicitationIdentity,
     pub server_name: String,
     #[serde(flatten)]
     pub request: McpServerElicitationRequest,
     // TODO: When core can correlate an elicitation with an MCP tool call, expose the associated
     // McpToolCall item id here as an optional field. The current core event does not carry that
     // association.
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash, JsonSchema, TS)]
+#[serde(untagged)]
+#[ts(export_to = "v2/")]
+pub enum McpElicitationIdentity {
+    String(String),
+    #[ts(type = "number")]
+    Integer(i64),
+}
+
+impl From<McpRequestId> for McpElicitationIdentity {
+    fn from(value: McpRequestId) -> Self {
+        match value {
+            McpRequestId::String(value) => Self::String(value),
+            McpRequestId::Integer(value) => Self::Integer(value),
+        }
+    }
 }
 
 /// Typed form schema for MCP `elicitation/create` requests.

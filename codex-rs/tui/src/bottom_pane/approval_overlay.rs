@@ -45,11 +45,11 @@ use codex_app_server_protocol::FileSystemAccessMode;
 use codex_app_server_protocol::FileSystemPath;
 use codex_app_server_protocol::FileSystemSandboxEntry;
 use codex_app_server_protocol::FileSystemSpecialPath;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::NetworkApprovalContext;
 use codex_app_server_protocol::NetworkApprovalProtocol;
 use codex_app_server_protocol::NetworkPolicyRuleAction;
-use codex_app_server_protocol::RequestId;
 use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::PermissionGrantScope;
@@ -101,7 +101,7 @@ pub(crate) enum ApprovalRequest {
         thread_id: ThreadId,
         thread_label: Option<String>,
         server_name: String,
-        request_id: RequestId,
+        elicitation_identity: McpElicitationIdentity,
         message: String,
     },
 }
@@ -142,14 +142,14 @@ impl ApprovalRequest {
             (
                 ApprovalRequest::McpElicitation {
                     server_name,
-                    request_id,
+                    elicitation_identity,
                     ..
                 },
                 ResolvedAppServerRequest::McpElicitation {
                     server_name: resolved_server_name,
-                    request_id: resolved_request_id,
+                    elicitation_identity: resolved_identity,
                 },
-            ) => server_name == resolved_server_name && request_id == resolved_request_id,
+            ) => server_name == resolved_server_name && elicitation_identity == resolved_identity,
             _ => false,
         }
     }
@@ -332,12 +332,12 @@ impl ApprovalOverlay {
                 (
                     ApprovalRequest::McpElicitation {
                         server_name,
-                        request_id,
+                        elicitation_identity,
                         ..
                     },
                     ApprovalDecision::McpElicitation(decision),
                 ) => {
-                    self.handle_elicitation_decision(server_name, request_id, *decision);
+                    self.handle_elicitation_decision(server_name, elicitation_identity, *decision);
                 }
                 _ => {}
             }
@@ -451,7 +451,7 @@ impl ApprovalOverlay {
     fn handle_elicitation_decision(
         &self,
         server_name: &str,
-        request_id: &RequestId,
+        elicitation_identity: &McpElicitationIdentity,
         decision: McpServerElicitationAction,
     ) {
         let Some(thread_id) = self
@@ -464,7 +464,7 @@ impl ApprovalOverlay {
         self.app_event_tx.resolve_elicitation(
             thread_id,
             server_name.to_string(),
-            request_id.clone(),
+            elicitation_identity.clone(),
             decision,
             /*content*/ None,
             /*meta*/ None,
@@ -510,12 +510,12 @@ impl ApprovalOverlay {
                 }
                 ApprovalRequest::McpElicitation {
                     server_name,
-                    request_id,
+                    elicitation_identity,
                     ..
                 } => {
                     self.handle_elicitation_decision(
                         server_name,
-                        request_id,
+                        elicitation_identity,
                         McpServerElicitationAction::Cancel,
                     );
                 }
@@ -1265,7 +1265,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             server_name: "test-server".to_string(),
-            request_id: RequestId::String("request-1".to_string()),
+            elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string()),
             message: "Need more information".to_string(),
         }
     }

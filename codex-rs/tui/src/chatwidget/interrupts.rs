@@ -116,11 +116,12 @@ impl QueuedInterrupt {
                 matches!(request, ResolvedAppServerRequest::FileChangeApproval { id }
                     if ev.call_id == id.as_str())
             }
-            QueuedInterrupt::Elicitation { request_id, params } => {
+            QueuedInterrupt::Elicitation { params, .. } => {
                 matches!(request, ResolvedAppServerRequest::McpElicitation {
                     server_name,
-                    request_id: resolved_request_id,
-                } if params.server_name == server_name.as_str() && request_id == resolved_request_id)
+                    elicitation_identity,
+                } if params.server_name == server_name.as_str()
+                    && params.elicitation_identity == *elicitation_identity)
             }
             QueuedInterrupt::RequestPermissions(ev) => {
                 matches!(request, ResolvedAppServerRequest::PermissionsApproval { id }
@@ -140,6 +141,10 @@ mod tests {
     use crate::approval_events::ExecApprovalRequestEvent;
     use codex_app_server_protocol::CommandExecutionSource;
     use codex_app_server_protocol::CommandExecutionStatus;
+    use codex_app_server_protocol::McpElicitationIdentity;
+    use codex_app_server_protocol::McpElicitationObjectType;
+    use codex_app_server_protocol::McpElicitationSchema;
+    use codex_app_server_protocol::McpServerElicitationRequest;
     use codex_app_server_protocol::ThreadItem;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
@@ -186,6 +191,38 @@ mod tests {
             exit_code: None,
             duration_ms: None,
         }
+    }
+
+    #[test]
+    fn remove_resolved_mcp_prompt_matches_stable_identity_not_wire_id() {
+        let mut manager = InterruptManager::new();
+        manager.push_elicitation(
+            AppServerRequestId::String("wire-2".to_string()),
+            McpServerElicitationRequestParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: Some("turn-1".to_string()),
+                elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string()),
+                server_name: "example".to_string(),
+                request: McpServerElicitationRequest::Form {
+                    meta: None,
+                    message: "Prompt".to_string(),
+                    requested_schema: McpElicitationSchema {
+                        schema_uri: None,
+                        type_: McpElicitationObjectType::Object,
+                        properties: std::collections::BTreeMap::new(),
+                        required: None,
+                    },
+                },
+            },
+        );
+
+        assert!(
+            manager.remove_resolved_prompt(&ResolvedAppServerRequest::McpElicitation {
+                server_name: "example".to_string(),
+                elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string()),
+            })
+        );
+        assert!(manager.queue.is_empty());
     }
 
     #[test]

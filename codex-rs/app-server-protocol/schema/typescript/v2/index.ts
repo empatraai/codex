@@ -106,6 +106,7 @@ export type { DynamicToolFunctionSpec } from "./DynamicToolFunctionSpec";
 export type { DynamicToolNamespaceSpec } from "./DynamicToolNamespaceSpec";
 export type { DynamicToolNamespaceTool } from "./DynamicToolNamespaceTool";
 export type { DynamicToolSpec } from "./DynamicToolSpec";
+export type { EmpatraInitialTurnParams } from "./EmpatraInitialTurnParams";
 export type { ErrorNotification } from "./ErrorNotification";
 export type { ExecPolicyAmendment } from "./ExecPolicyAmendment";
 export type { ExperimentalFeature } from "./ExperimentalFeature";
@@ -218,6 +219,7 @@ export type { McpElicitationBooleanSchema } from "./McpElicitationBooleanSchema"
 export type { McpElicitationBooleanType } from "./McpElicitationBooleanType";
 export type { McpElicitationConstOption } from "./McpElicitationConstOption";
 export type { McpElicitationEnumSchema } from "./McpElicitationEnumSchema";
+export type { McpElicitationIdentity } from "./McpElicitationIdentity";
 export type { McpElicitationLegacyTitledEnumSchema } from "./McpElicitationLegacyTitledEnumSchema";
 export type { McpElicitationMultiSelectEnumSchema } from "./McpElicitationMultiSelectEnumSchema";
 export type { McpElicitationNumberSchema } from "./McpElicitationNumberSchema";

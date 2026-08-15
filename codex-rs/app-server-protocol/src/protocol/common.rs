@@ -2496,6 +2496,10 @@ mod tests {
         let params = v2::McpServerElicitationRequestParams {
             thread_id: "thr_123".to_string(),
             turn_id: Some("turn_123".to_string()),
+            elicitation_identity: codex_protocol::mcp::RequestId::String(
+                "mcp-elicit-42".to_string(),
+            )
+            .into(),
             server_name: "codex_apps".to_string(),
             request: v2::McpServerElicitationRequest::Form {
                 meta: None,
@@ -2515,6 +2519,7 @@ mod tests {
                 "params": {
                     "threadId": "thr_123",
                     "turnId": "turn_123",
+                    "elicitationIdentity": "mcp-elicit-42",
                     "serverName": "codex_apps",
                     "mode": "form",
                     "_meta": null,
@@ -2531,6 +2536,30 @@ mod tests {
                 }
             }),
             serde_json::to_value(&request)?,
+        );
+
+        let replay = ServerRequest::McpServerElicitationRequest {
+            request_id: RequestId::Integer(10),
+            params: params.clone(),
+        };
+        let mut distinct_params = params.clone();
+        distinct_params.elicitation_identity =
+            codex_protocol::mcp::RequestId::String("mcp-elicit-43".to_string()).into();
+        let distinct = ServerRequest::McpServerElicitationRequest {
+            request_id: RequestId::Integer(11),
+            params: distinct_params,
+        };
+        let replay_json = serde_json::to_value(replay)?;
+        let distinct_json = serde_json::to_value(distinct)?;
+        assert_eq!(replay_json["id"], json!(10));
+        assert_eq!(
+            replay_json["params"]["elicitationIdentity"],
+            "mcp-elicit-42"
+        );
+        assert_eq!(distinct_json["id"], json!(11));
+        assert_eq!(
+            distinct_json["params"]["elicitationIdentity"],
+            "mcp-elicit-43"
         );
 
         let payload = ServerRequestPayload::McpServerElicitationRequest(params);

@@ -1,7 +1,7 @@
 #[cfg(test)]
 use crate::app_command::AppCommand as Op;
+use codex_app_server_protocol::McpElicitationIdentity;
 use codex_app_server_protocol::McpServerElicitationAction;
-use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_protocol::ThreadId;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -62,7 +62,7 @@ pub(crate) enum AppLinkSuggestionType {
 pub(crate) struct AppLinkElicitationTarget {
     pub(crate) thread_id: ThreadId,
     pub(crate) server_name: String,
-    pub(crate) request_id: AppServerRequestId,
+    pub(crate) elicitation_identity: McpElicitationIdentity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +83,7 @@ impl AppLinkViewParams {
     pub(crate) fn from_url_app_server_request(
         thread_id: ThreadId,
         server_name: &str,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         request: &codex_app_server_protocol::McpServerElicitationRequest,
     ) -> Option<Self> {
         let codex_app_server_protocol::McpServerElicitationRequest::Url {
@@ -100,7 +100,7 @@ impl AppLinkViewParams {
             return Self::from_codex_apps_auth_url_parts(
                 thread_id,
                 server_name,
-                request_id,
+                elicitation_identity,
                 meta.as_ref(),
                 message,
                 url.as_str(),
@@ -112,7 +112,7 @@ impl AppLinkViewParams {
         Some(Self::from_generic_url_parts(
             thread_id,
             server_name,
-            request_id,
+            elicitation_identity,
             message,
             url.as_str(),
             elicitation_id,
@@ -122,7 +122,7 @@ impl AppLinkViewParams {
     fn from_codex_apps_auth_url_parts(
         thread_id: ThreadId,
         server_name: &str,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         meta: Option<&serde_json::Value>,
         message: &str,
         url: &str,
@@ -170,7 +170,7 @@ impl AppLinkViewParams {
             elicitation_target: Some(AppLinkElicitationTarget {
                 thread_id,
                 server_name: server_name.to_string(),
-                request_id,
+                elicitation_identity,
             }),
         })
     }
@@ -178,7 +178,7 @@ impl AppLinkViewParams {
     fn from_generic_url_parts(
         thread_id: ThreadId,
         server_name: &str,
-        request_id: AppServerRequestId,
+        elicitation_identity: McpElicitationIdentity,
         message: &str,
         url: &str,
         elicitation_id: &str,
@@ -197,7 +197,7 @@ impl AppLinkViewParams {
             elicitation_target: Some(AppLinkElicitationTarget {
                 thread_id,
                 server_name: server_name.to_string(),
-                request_id,
+                elicitation_identity,
             }),
         }
     }
@@ -355,7 +355,7 @@ impl AppLinkView {
         self.app_event_tx.resolve_elicitation(
             target.thread_id,
             target.server_name.clone(),
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             decision,
             /*content*/ None,
             /*meta*/ None,
@@ -758,7 +758,7 @@ impl BottomPaneView for AppLinkView {
     fn dismiss_app_server_request(&mut self, request: &ResolvedAppServerRequest) -> bool {
         let ResolvedAppServerRequest::McpElicitation {
             server_name,
-            request_id,
+            elicitation_identity,
         } = request
         else {
             return false;
@@ -766,7 +766,9 @@ impl BottomPaneView for AppLinkView {
         let Some(target) = self.elicitation_target.as_ref() else {
             return false;
         };
-        if target.server_name != *server_name || target.request_id != *request_id {
+        if target.server_name != *server_name
+            || target.elicitation_identity != *elicitation_identity
+        {
             return false;
         }
 
@@ -862,7 +864,7 @@ mod tests {
             thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000001")
                 .expect("valid thread id"),
             server_name: "codex_apps".to_string(),
-            request_id: AppServerRequestId::String("request-1".to_string()),
+            elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string()),
         }
     }
 
@@ -871,7 +873,7 @@ mod tests {
             thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000002")
                 .expect("valid thread id"),
             server_name: "payments".to_string(),
-            request_id: AppServerRequestId::String("request-2".to_string()),
+            elicitation_identity: McpElicitationIdentity::String("elicitation-2".to_string()),
         }
     }
 
@@ -901,7 +903,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             &request,
         )
         .expect("expected auth app link params");
@@ -929,7 +931,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             &request,
         )
         .expect("expected generic URL app link params");
@@ -965,7 +967,7 @@ mod tests {
             let params = AppLinkViewParams::from_url_app_server_request(
                 target.thread_id,
                 &target.server_name,
-                target.request_id.clone(),
+                target.elicitation_identity.clone(),
                 &request,
             );
             assert!(params.is_none(), "expected {url} to be rejected");
@@ -988,7 +990,7 @@ mod tests {
             let params = AppLinkViewParams::from_url_app_server_request(
                 target.thread_id,
                 &target.server_name,
-                target.request_id.clone(),
+                target.elicitation_identity.clone(),
                 &request,
             );
             assert!(params.is_none(), "expected {url} to be rejected");
@@ -1211,7 +1213,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             &request,
         )
         .expect("expected generic URL app link params");
@@ -1235,7 +1237,9 @@ mod tests {
                     op,
                     Op::ResolveElicitation {
                         server_name: "payments".to_string(),
-                        request_id: AppServerRequestId::String("request-2".to_string()),
+                        elicitation_identity: McpElicitationIdentity::String(
+                            "elicitation-2".to_string(),
+                        ),
                         decision: McpServerElicitationAction::Accept,
                         content: None,
                         meta: None,
@@ -1391,7 +1395,9 @@ mod tests {
                     op,
                     Op::ResolveElicitation {
                         server_name: "codex_apps".to_string(),
-                        request_id: AppServerRequestId::String("request-1".to_string()),
+                        elicitation_identity: McpElicitationIdentity::String(
+                            "elicitation-1".to_string(),
+                        ),
                         decision: McpServerElicitationAction::Accept,
                         content: None,
                         meta: None,
@@ -1433,7 +1439,9 @@ mod tests {
                     op,
                     Op::ResolveElicitation {
                         server_name: "codex_apps".to_string(),
-                        request_id: AppServerRequestId::String("request-1".to_string()),
+                        elicitation_identity: McpElicitationIdentity::String(
+                            "elicitation-1".to_string(),
+                        ),
                         decision: McpServerElicitationAction::Decline,
                         content: None,
                         meta: None,
@@ -1483,7 +1491,9 @@ mod tests {
                     op,
                     Op::ResolveElicitation {
                         server_name: "codex_apps".to_string(),
-                        request_id: AppServerRequestId::String("request-1".to_string()),
+                        elicitation_identity: McpElicitationIdentity::String(
+                            "elicitation-1".to_string(),
+                        ),
                         decision: McpServerElicitationAction::Accept,
                         content: None,
                         meta: None,
@@ -1519,7 +1529,7 @@ mod tests {
         assert!(
             view.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
                 server_name: "codex_apps".to_string(),
-                request_id: AppServerRequestId::String("request-1".to_string()),
+                elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string(),),
             })
         );
         assert!(view.is_complete());
@@ -1548,7 +1558,7 @@ mod tests {
         assert!(
             !view.dismiss_app_server_request(&ResolvedAppServerRequest::McpElicitation {
                 server_name: "other_server".to_string(),
-                request_id: AppServerRequestId::String("request-1".to_string()),
+                elicitation_identity: McpElicitationIdentity::String("elicitation-1".to_string(),),
             })
         );
         assert!(!view.is_complete());
@@ -1656,7 +1666,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             &request,
         )
         .expect("expected generic URL app link params");
@@ -1685,7 +1695,7 @@ mod tests {
         let params = AppLinkViewParams::from_url_app_server_request(
             target.thread_id,
             &target.server_name,
-            target.request_id.clone(),
+            target.elicitation_identity.clone(),
             &request,
         )
         .expect("expected generic URL app link params");

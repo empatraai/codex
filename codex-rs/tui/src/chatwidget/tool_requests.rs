@@ -338,7 +338,7 @@ impl ChatWidget {
 
     pub(crate) fn handle_elicitation_request_now(
         &mut self,
-        request_id: AppServerRequestId,
+        _request_id: AppServerRequestId,
         params: McpServerElicitationRequestParams,
     ) {
         self.flush_answer_stream_with_separator();
@@ -352,15 +352,13 @@ impl ChatWidget {
         if let Some(params) = crate::bottom_pane::AppLinkViewParams::from_url_app_server_request(
             thread_id,
             &params.server_name,
-            request_id.clone(),
+            params.elicitation_identity.clone(),
             &params.request,
         ) {
             self.open_app_link_view(params);
-        } else if let Some(request) = McpServerElicitationFormRequest::from_app_server_request(
-            thread_id,
-            request_id.clone(),
-            params.clone(),
-        ) {
+        } else if let Some(request) =
+            McpServerElicitationFormRequest::from_app_server_request(thread_id, params.clone())
+        {
             self.bottom_pane
                 .push_mcp_server_elicitation_request(request);
         } else {
@@ -370,7 +368,7 @@ impl ChatWidget {
                         thread_id,
                         thread_label: None,
                         server_name: params.server_name,
-                        request_id,
+                        elicitation_identity: params.elicitation_identity,
                         message,
                     };
                     self.bottom_pane
@@ -381,7 +379,7 @@ impl ChatWidget {
                     self.app_event_tx.resolve_elicitation(
                         thread_id,
                         params.server_name,
-                        request_id,
+                        params.elicitation_identity,
                         codex_app_server_protocol::McpServerElicitationAction::Decline,
                         /*content*/ None,
                         /*meta*/ None,
