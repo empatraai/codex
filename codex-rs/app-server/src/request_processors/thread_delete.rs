@@ -16,6 +16,9 @@ impl ThreadRequestProcessor {
             .await
         {
             Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+            // The local store reports a missing rollout as InvalidRequest; that
+            // is the expected "nothing to delete" outcome here.
+            Err(error) if is_no_rollout_found_error(&error) => {}
             Err(error) => return Err(thread_store_delete_error(error)),
         }
         if let Some(state_db) = self.state_db.as_ref() {
@@ -38,6 +41,7 @@ impl ThreadRequestProcessor {
             .await
         {
             Err(ThreadStoreError::ThreadNotFound { .. }) => Ok(()),
+            Err(error) if is_no_rollout_found_error(&error) => Ok(()),
             Ok(_) => Err(internal_error(format!(
                 "atomic thread {thread_id} remained persisted after cleanup"
             ))),
@@ -196,6 +200,11 @@ impl ThreadRequestProcessor {
             log_db.flush().await;
         }
     }
+}
+
+fn is_no_rollout_found_error(error: &ThreadStoreError) -> bool {
+    matches!(error, ThreadStoreError::InvalidRequest { message }
+        if message.starts_with("no rollout found for thread id "))
 }
 
 fn thread_store_delete_error(err: ThreadStoreError) -> JSONRPCErrorError {

@@ -59,6 +59,18 @@ mod atomic_initial_event_bundle_tests {
         RolloutItem::ResponseItem(item)
     }
 
+    fn persisted_context_message(turn_id: &str, role: &str, value: &str) -> RolloutItem {
+        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
+            vec![text(value).into_core()],
+            LocalImagePreparation::Defer,
+        ));
+        if let ResponseItem::Message { role: item_role, .. } = &mut item {
+            *item_role = role.to_string();
+        }
+        item.set_turn_id_if_missing(turn_id);
+        RolloutItem::ResponseItem(item)
+    }
+
     fn turn_started(turn_id: &str) -> RolloutItem {
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: turn_id.to_string(),
@@ -190,7 +202,7 @@ mod atomic_initial_event_bundle_tests {
             atomic_initial_event_bundle(
                 &[
                     turn_started(turn_id),
-                    persisted_message(turn_id, "wrong"),
+                    persisted_message(turn_id, "expected"),
                     persisted_message(turn_id, "expected"),
                     user_message_completed(turn_id, "expected"),
                 ],
@@ -199,11 +211,35 @@ mod atomic_initial_event_bundle_tests {
             ),
             AtomicInitialEvidence::Partial,
         ));
+    }
+
+    #[test]
+    fn accepts_turn_scoped_context_items_beside_the_initial_input() {
+        // A first turn persists developer instructions and an environment-context
+        // user message beside the input; those are part of the reconstructed
+        // thread and must not invalidate the durability evidence.
+        let turn_id = "018bcfe5-6800-7000-8000-000000000099";
+        let AtomicInitialEvidence::Complete(bundle) = atomic_initial_event_bundle(
+            &[
+                turn_started(turn_id),
+                persisted_context_message(turn_id, "developer", "<permissions instructions>"),
+                persisted_context_message(turn_id, "user", "<environment_context>"),
+                persisted_message(turn_id, "expected"),
+                user_message_completed(turn_id, "expected"),
+            ],
+            turn_id,
+            &[text("expected")],
+        ) else {
+            panic!("context items beside the initial input should be reconstructable")
+        };
+        assert_eq!(bundle.len(), 1);
+        // A user message with different content that duplicates the input text
+        // still keeps the turn Partial.
         assert!(matches!(
             atomic_initial_event_bundle(
                 &[
                     turn_started(turn_id),
-                    persisted_message(turn_id, "expected"),
+                    persisted_context_message(turn_id, "user", "expected"),
                     persisted_message(turn_id, "expected"),
                     user_message_completed(turn_id, "expected"),
                 ],

@@ -4230,12 +4230,16 @@ fn atomic_initial_event_bundle(
                 if response_item.turn_id() == Some(turn_id) =>
             {
                 matching_turn_evidence = true;
-                response_count += 1;
-                invalid_evidence |= !matches!(
-                    response_item,
-                    ResponseItem::Message { role, content, .. }
-                        if within_matching_turn && role == "user" && content == &expected_content
-                );
+                // A first turn legitimately persists turn-scoped context items
+                // (developer instructions, environment context) beside the user
+                // input. Durability evidence only counts the exact expected
+                // input; extra or duplicated copies keep the turn Partial.
+                if let ResponseItem::Message { role, content, .. } = response_item
+                    && role == "user"
+                    && content == &expected_content
+                {
+                    response_count += 1;
+                }
             }
             RolloutItem::EventMsg(EventMsg::UserMessage(event)) if within_matching_turn => {
                 matching_turn_evidence = true;
