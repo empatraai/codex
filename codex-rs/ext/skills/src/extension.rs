@@ -37,7 +37,7 @@ use crate::provider::SkillReadRequest;
 use crate::render::MAX_SKILL_NAME_BYTES;
 use crate::render::MAX_SKILL_PATH_BYTES;
 use crate::render::available_skills_fragment;
-use crate::render::truncate_main_prompt_contents;
+use crate::render::render_main_prompt_contents;
 use crate::render::truncate_utf8_to_bytes;
 use crate::selection::collect_explicit_skill_mentions;
 use crate::sources::SkillProviders;
@@ -235,10 +235,13 @@ where
             let mut fragments: Vec<Box<dyn ContextualUserFragment + Send>> = Vec::new();
             if config.include_instructions {
                 let mut turn_catalog = catalog.clone();
-                turn_catalog.entries.retain(|entry| {
-                    entry.authority.kind != SkillSourceKind::Executor
-                        && entry.authority.kind != SkillSourceKind::Orchestrator
-                });
+                turn_catalog
+                    .entries
+                    .retain(|entry| match &entry.authority.kind {
+                        SkillSourceKind::Host => config.include_host_catalog,
+                        SkillSourceKind::Executor | SkillSourceKind::Orchestrator => false,
+                        SkillSourceKind::Custom(_) => true,
+                    });
                 if let Some(fragment) = available_skills_fragment(&turn_catalog) {
                     fragments.push(Box::new(fragment));
                 }
@@ -253,12 +256,17 @@ where
                     .await
                 {
                     Ok(read_result) => {
-                        let (contents, truncated) =
-                            truncate_main_prompt_contents(read_result.contents.as_str());
+                        let original_bytes = read_result.contents.len();
+                        let (contents, truncated) = render_main_prompt_contents(
+                            &entry.authority.kind,
+                            read_result.contents.as_str(),
+                        );
                         if truncated {
                             let warning = format!(
-                                "Skill `{}` exceeded the main prompt context limit and was truncated.",
-                                entry.name
+                                "Skill source `{}` main prompt was truncated from {} to {} bytes.",
+                                entry.authority.kind,
+                                original_bytes,
+                                contents.len(),
                             );
                             self.emit_warning(&input.turn_id, warning.clone());
                             warnings.push(warning);

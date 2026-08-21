@@ -95,8 +95,16 @@ fn render_skill_line(entry: &SkillCatalogEntry, description: &str) -> String {
     }
 }
 
-pub(crate) fn truncate_main_prompt_contents(contents: &str) -> (String, bool) {
-    truncate_utf8_to_bytes(contents, MAX_MAIN_PROMPT_BYTES)
+pub(crate) fn render_main_prompt_contents(
+    source_kind: &SkillSourceKind,
+    contents: &str,
+) -> (String, bool) {
+    match source_kind {
+        SkillSourceKind::Host => (contents.to_string(), false),
+        SkillSourceKind::Executor | SkillSourceKind::Orchestrator | SkillSourceKind::Custom(_) => {
+            truncate_utf8_to_bytes(contents, MAX_MAIN_PROMPT_BYTES)
+        }
+    }
 }
 
 pub(crate) fn truncate_utf8_to_bytes(contents: &str, max_bytes: usize) -> (String, bool) {

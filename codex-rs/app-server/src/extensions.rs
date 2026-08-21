@@ -89,6 +89,9 @@ where
         skill_providers,
         |config: &Config| codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            // Core owns the stable host catalog; this extension owns dynamic non-host state and
+            // explicitly selected bodies only.
+            include_host_catalog: false,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             orchestrator_skills_enabled: config.orchestrator_skills_enabled,
         },

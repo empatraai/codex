@@ -147,6 +147,305 @@ async fn installed_extension_uses_host_service_snapshot() -> TestResult {
 }
 
 #[tokio::test]
+async fn omitted_host_catalog_keeps_selected_host_body_complete_across_turns() -> TestResult {
+    let codex_home = test_codex_home();
+    let skill_path = codex_home.join("skills").join("large").join("SKILL.md");
+    std::fs::create_dir_all(
+        skill_path
+            .parent()
+            .ok_or("skill path should have a parent")?,
+    )?;
+    let unique_tail = "COMPLETE_HOST_SKILL_TAIL";
+    let contents = format!(
+        "---\nname: large\ndescription: Large host skill.\n---\n# Large\n\n{}\n{unique_tail}",
+        "x".repeat(9_000)
+    );
+    std::fs::write(&skill_path, &contents)?;
+
+    let mut config = default_config();
+    config.include_host_catalog = false;
+    let mut builder = ExtensionRegistryBuilder::new();
+    install(&mut builder, skills_extension_config);
+    let registry = builder.build();
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread");
+    let session_source = SessionSource::Cli;
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &session_source,
+            persistent_thread_state_available: true,
+            environments: &[],
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+
+    let skill_path = AbsolutePathBuf::try_from(skill_path)?;
+    let skill_path_string = skill_path.to_string_lossy().into_owned();
+    let mut outcome = SkillLoadOutcome::default();
+    outcome.skills.push(SkillMetadata {
+        name: "large".to_string(),
+        description: "Large host skill.".to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        policy: None,
+        path_to_skills_md: skill_path.clone(),
+        scope: SkillScope::User,
+        plugin_id: None,
+    });
+    let loaded_skills = Arc::new(outcome);
+
+    for turn_id in ["turn-1", "turn-2"] {
+        let turn_store = ExtensionData::new(turn_id);
+        turn_store.insert(HostSkillsSnapshot::new(Arc::clone(&loaded_skills)));
+        let fragments = registry.turn_input_contributors()[0]
+            .contribute(
+                TurnInputContext {
+                    turn_id: turn_id.to_string(),
+                    user_input: vec![UserInput::Text {
+                        text: "$large".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    environments: Vec::new(),
+                },
+                &session_store,
+                &thread_store,
+                &turn_store,
+            )
+            .await;
+
+        assert_eq!(1, fragments.len(), "host catalog must stay core-owned");
+        assert_eq!("user", fragments[0].role());
+        let rendered = fragments[0].render();
+        assert!(rendered.contains(&contents));
+        assert!(rendered.contains(unique_tail));
+        let injected = turn_store
+            .get::<InjectedHostSkillPrompts>()
+            .ok_or("complete extension injection must suppress the legacy duplicate")?;
+        assert!(injected.contains_path(&skill_path_string));
+    }
+
+    std::fs::remove_dir_all(codex_home)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_non_host_body_is_bounded_with_non_sensitive_diagnostic() -> TestResult {
+    let read_contents = format!("{}NON_HOST_SECRET_TAIL", "z".repeat(9_000));
+    let provider = Arc::new(StaticSkillProvider {
+        catalog: SkillCatalog {
+            entries: vec![test_entry(
+                SkillSourceKind::Executor,
+                "env-1",
+                "executor/large-executor",
+                "large-executor/SKILL.md",
+            )],
+            warnings: Vec::new(),
+        },
+        read_requests: Arc::new(Mutex::new(Vec::new())),
+        read_contents: read_contents.clone(),
+        list_calls: None,
+        fail_first_list: false,
+    });
+    let providers = SkillProviders::new().with_executor_provider(provider);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let mut builder =
+        ExtensionRegistryBuilder::with_event_sink(Arc::new(ChannelEventSink(event_tx)));
+    install_with_providers(&mut builder, providers, skills_extension_config);
+    let registry = builder.build();
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread");
+    let session_source = SessionSource::Cli;
+    let config = default_config();
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &session_source,
+            persistent_thread_state_available: true,
+            environments: &[],
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+
+    let turn_store = ExtensionData::new("turn-1");
+    let turn_environment = TurnEnvironmentSelection {
+        environment_id: "env-1".to_string(),
+        cwd: PathUri::parse("file:///workspace").expect("cwd URI"),
+    };
+    registry.context_contributors()[0]
+        .contribute_world_state(WorldStateContributionInput {
+            thread_id: codex_protocol::ThreadId::new(),
+            turn_id: "turn-1",
+            environments: std::slice::from_ref(&turn_environment),
+            ready_selected_capability_roots: &[SelectedCapabilityRoot {
+                id: "large-executor".to_string(),
+                location: CapabilityRootLocation::Environment {
+                    environment_id: "env-1".to_string(),
+                    path: PathUri::parse("file:///skills/large-executor").expect("skill root URI"),
+                },
+            }],
+            session_store: &session_store,
+            thread_store: &thread_store,
+            turn_store: &turn_store,
+        })
+        .await;
+    let fragments = registry.turn_input_contributors()[0]
+        .contribute(
+            TurnInputContext {
+                turn_id: "turn-1".to_string(),
+                user_input: vec![UserInput::Text {
+                    text: "$large-executor".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                environments: Vec::new(),
+            },
+            &session_store,
+            &thread_store,
+            &turn_store,
+        )
+        .await;
+
+    assert_eq!(1, fragments.len());
+    let rendered = fragments[0].render();
+    assert!(!rendered.contains("NON_HOST_SECRET_TAIL"));
+    assert!(rendered.len() < read_contents.len());
+    let event = event_rx.recv()?;
+    let EventMsg::Warning(warning) = event.msg else {
+        return Err("expected bounded skill warning".into());
+    };
+    let message = warning.message;
+    assert!(message.contains("executor"));
+    assert!(message.contains("9020"));
+    assert!(message.contains("8000"));
+    assert!(!message.contains("large-executor"));
+    assert!(!message.contains("NON_HOST_SECRET_TAIL"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_non_host_selection_suppresses_same_name_host_duplicate() -> TestResult {
+    let host_path = AbsolutePathBuf::try_from("/tmp/host/shared/SKILL.md")?;
+    let mut outcome = SkillLoadOutcome::default();
+    outcome.skills.push(SkillMetadata {
+        name: "shared".to_string(),
+        description: "Host shared skill.".to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        policy: None,
+        path_to_skills_md: host_path.clone(),
+        scope: SkillScope::User,
+        plugin_id: None,
+    });
+    let host_provider = Arc::new(StaticSkillProvider {
+        catalog: SkillCatalog {
+            entries: vec![test_entry(
+                SkillSourceKind::Host,
+                "host",
+                "host/shared",
+                host_path.to_string_lossy().as_ref(),
+            )],
+            warnings: Vec::new(),
+        },
+        read_requests: Arc::new(Mutex::new(Vec::new())),
+        read_contents: "HOST_BODY_MUST_NOT_BE_INJECTED".to_string(),
+        list_calls: None,
+        fail_first_list: false,
+    });
+    let executor_locator = "skill://executor/shared/SKILL.md";
+    let executor_provider = Arc::new(StaticSkillProvider {
+        catalog: SkillCatalog {
+            entries: vec![
+                SkillCatalogEntry::new(
+                    SkillPackageId("executor/shared".to_string()),
+                    SkillAuthority::new(SkillSourceKind::Executor, "env-1"),
+                    "shared",
+                    "Executor shared skill.",
+                    SkillResourceId::new(executor_locator),
+                )
+                .with_display_path(executor_locator),
+            ],
+            warnings: Vec::new(),
+        },
+        read_requests: Arc::new(Mutex::new(Vec::new())),
+        read_contents: "EXECUTOR_SELECTED_BODY".to_string(),
+        list_calls: None,
+        fail_first_list: false,
+    });
+    let providers = SkillProviders::new()
+        .with_host_provider(host_provider)
+        .with_executor_provider(executor_provider);
+    let mut builder = ExtensionRegistryBuilder::new();
+    install_with_providers(&mut builder, providers, skills_extension_config);
+    let registry = builder.build();
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new("thread");
+    let session_source = SessionSource::Cli;
+    let mut config = default_config();
+    config.include_host_catalog = false;
+    registry.thread_lifecycle_contributors()[0]
+        .on_thread_start(ThreadStartInput {
+            config: &config,
+            session_source: &session_source,
+            persistent_thread_state_available: true,
+            environments: &[],
+            session_store: &session_store,
+            thread_store: &thread_store,
+        })
+        .await;
+
+    let turn_store = ExtensionData::new("turn-1");
+    turn_store.insert(HostSkillsSnapshot::new(Arc::new(outcome)));
+    registry.context_contributors()[0]
+        .contribute_world_state(WorldStateContributionInput {
+            thread_id: codex_protocol::ThreadId::new(),
+            turn_id: "turn-1",
+            environments: &[],
+            ready_selected_capability_roots: &[SelectedCapabilityRoot {
+                id: "shared".to_string(),
+                location: CapabilityRootLocation::Environment {
+                    environment_id: "env-1".to_string(),
+                    path: PathUri::parse("file:///skills/shared").expect("skill root URI"),
+                },
+            }],
+            session_store: &session_store,
+            thread_store: &thread_store,
+            turn_store: &turn_store,
+        })
+        .await;
+    let fragments = registry.turn_input_contributors()[0]
+        .contribute(
+            TurnInputContext {
+                turn_id: "turn-1".to_string(),
+                user_input: vec![UserInput::Mention {
+                    name: "shared".to_string(),
+                    path: executor_locator.to_string(),
+                }],
+                environments: Vec::new(),
+            },
+            &session_store,
+            &thread_store,
+            &turn_store,
+        )
+        .await;
+
+    assert_eq!(1, fragments.len());
+    let rendered = fragments[0].render();
+    assert!(rendered.contains("EXECUTOR_SELECTED_BODY"));
+    assert!(!rendered.contains("HOST_BODY_MUST_NOT_BE_INJECTED"));
+    let injected = turn_store
+        .get::<InjectedHostSkillPrompts>()
+        .ok_or("same-name host body must be suppressed from the legacy path")?;
+    assert!(injected.contains_path(&host_path.to_string_lossy()));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cache() -> TestResult {
     let read_requests = Arc::new(Mutex::new(Vec::new()));
     let list_calls = Arc::new(AtomicUsize::new(0));
@@ -161,6 +460,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
             warnings: Vec::new(),
         },
         read_requests: Arc::clone(&read_requests),
+        read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
         list_calls: Some(Arc::clone(&list_calls)),
         fail_first_list: false,
     });
@@ -353,6 +653,7 @@ async fn default_context_truncates_catalog_descriptions() -> TestResult {
                 warnings: Vec::new(),
             },
             read_requests: Arc::new(Mutex::new(Vec::new())),
+            read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
             list_calls: None,
             fail_first_list: false,
         }));
@@ -403,6 +704,7 @@ async fn skills_list_truncates_catalog_descriptions_in_tool_output() -> TestResu
                 warnings: Vec::new(),
             },
             read_requests: Arc::new(Mutex::new(Vec::new())),
+            read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
             list_calls: None,
             fail_first_list: false,
         }));
@@ -473,6 +775,7 @@ async fn orchestrator_catalog_snapshot_caches_failure() -> TestResult {
                 warnings: Vec::new(),
             },
             read_requests: Arc::new(Mutex::new(Vec::new())),
+            read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
             list_calls: Some(Arc::clone(&list_calls)),
             fail_first_list: true,
         }));
@@ -554,6 +857,7 @@ async fn root_qualified_locator_selects_only_the_matching_executor_skill() -> Te
             warnings: Vec::new(),
         },
         read_requests: Arc::clone(&read_requests),
+        read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
         list_calls: None,
         fail_first_list: false,
     });
@@ -654,6 +958,7 @@ async fn prompt_hidden_skill_can_still_be_invoked() -> TestResult {
             warnings: Vec::new(),
         },
         read_requests: Arc::clone(&read_requests),
+        read_contents: "# Lint Fix\n\nRun the formatter.".to_string(),
         list_calls: None,
         fail_first_list: false,
     });
@@ -712,6 +1017,7 @@ async fn prompt_hidden_skill_can_still_be_invoked() -> TestResult {
 struct StaticSkillProvider {
     catalog: SkillCatalog,
     read_requests: Arc<Mutex<Vec<SkillReadRequest>>>,
+    read_contents: String,
     list_calls: Option<Arc<AtomicUsize>>,
     fail_first_list: bool,
 }
@@ -750,7 +1056,7 @@ impl SkillProvider for StaticSkillProvider {
                 .push(request.clone());
             Ok(SkillReadResult {
                 resource: request.resource,
-                contents: "# Lint Fix\n\nRun the formatter.".to_string(),
+                contents: self.read_contents.clone(),
             })
         })
     }
@@ -780,6 +1086,7 @@ fn test_entry(
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TestConfig {
     include_instructions: bool,
+    include_host_catalog: bool,
     bundled_skills_enabled: bool,
     orchestrator_skills_enabled: bool,
 }
@@ -787,6 +1094,7 @@ struct TestConfig {
 fn default_config() -> TestConfig {
     TestConfig {
         include_instructions: true,
+        include_host_catalog: true,
         bundled_skills_enabled: true,
         orchestrator_skills_enabled: true,
     }
@@ -795,6 +1103,7 @@ fn default_config() -> TestConfig {
 fn skills_extension_config(config: &TestConfig) -> SkillsExtensionConfig {
     SkillsExtensionConfig {
         include_instructions: config.include_instructions,
+        include_host_catalog: config.include_host_catalog,
         bundled_skills_enabled: config.bundled_skills_enabled,
         orchestrator_skills_enabled: config.orchestrator_skills_enabled,
     }
